@@ -4,6 +4,8 @@
   const FILE_NAME_KEY = 'budget.drive.file_name';
   const API_FILES = 'https://www.googleapis.com/drive/v3/files';
   let authPromise = null;
+  let cachedToken = null;
+  let tokenExpiresAt = 0;
 
   function getMeta() {
     return {
@@ -37,6 +39,7 @@
   async function getToken() {
     const meta = getMeta();
     if (!meta.clientId) throw new Error('Save a Google OAuth client ID first.');
+    if (cachedToken && Date.now() < tokenExpiresAt - 60000) return cachedToken;
     await loadScript();
     if (!authPromise) {
       authPromise = new Promise((resolve, reject) => {
@@ -54,8 +57,9 @@
             }
             if (response && response.access_token) {
               settled = true;
-              token = response.access_token;
-              resolve(token);
+              cachedToken = response.access_token;
+              tokenExpiresAt = Date.now() + (Number(response.expires_in) > 0 ? Number(response.expires_in) * 1000 : 3600000);
+              resolve(cachedToken);
               return;
             }
             settled = true;
@@ -74,7 +78,7 @@
     }
     const res = await authPromise;
     authPromise = null;
-    return res.access_token;
+    return res;
   }
 
   async function request(path, options) {
@@ -124,8 +128,6 @@
   }
 
   async function connect() {
-    const params = new URLSearchParams({ q: "name='budget.db' and trashed=false", fields: 'files(id,name,modifiedTime)', pageSize: '10', orderBy: 'modifiedTime desc' });
-    await request(API_FILES + '?' + params.toString());
     const file = await findFile();
     if (file) saveMeta({ fileId: file.id, fileName: file.name || 'budget.db' });
     return file;
