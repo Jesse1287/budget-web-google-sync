@@ -3,6 +3,7 @@
   const FILE_ID_KEY = 'budget.drive.file_id';
   const FILE_NAME_KEY = 'budget.drive.file_name';
   const API_FILES = 'https://www.googleapis.com/drive/v3/files';
+  const UPLOAD_FILES = 'https://www.googleapis.com/upload/drive/v3/files';
   let authPromise = null;
   let cachedToken = null;
   let tokenExpiresAt = 0;
@@ -81,15 +82,23 @@
     return res;
   }
 
-  async function request(path, options) {
+  async function request(path, options, retried) {
+    const hadCached = Boolean(cachedToken);
     const token = await getToken();
     const res = await fetch(path, Object.assign({}, options, {
       headers: Object.assign({ Authorization: 'Bearer ' + token }, options && options.headers)
     }));
+    if (res.status === 401 && hadCached && !retried) {
+      cachedToken = null;
+      tokenExpiresAt = 0;
+      return request(path, options, true);
+    }
     if (!res.ok) {
       let msg = res.statusText;
       try { const e = await res.json(); msg = e.error && e.error.message ? e.error.message : msg; } catch {}
-      throw new Error('Google Drive: ' + msg);
+      const err = new Error('Google Drive: ' + msg);
+      err.status = res.status;
+      throw err;
     }
     return res;
   }
@@ -106,17 +115,17 @@
     const file = new Uint8Array(bytes);
     let fileId = meta.fileId;
     if (fileId) {
-      const res = await request('https://www.googleapis.com/upload/drive/v3/files/' + fileId, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+      const res = await request(UPLOAD_FILES + '/' + fileId, { method: 'PUT', headers: { 'Content-Type': 'application/x-sqlite3' }, body: file });
       const data = await res.json();
       saveMeta({ fileId: data.id, fileName: data.name || 'budget.db' });
       return { fileId: data.id, fileName: data.name || 'budget.db' };
     }
     const boundary = 'budget' + Date.now();
-    const metaJson = JSON.stringify({ name: 'budget.db', mimeType: 'application/octet-stream' });
-    const blobPart1 = new Blob([`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metaJson}\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`], { type: '' });
-    const blobPart2 = new Blob([`--${boundary}--\r\n`], { type: '' });
+    const metaJson = JSON.stringify({ name: 'budget.db', mimeType: 'application/x-sqlite3' });
+    const blobPart1 = new Blob([`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metaJson}\r\n--${boundary}\r\nContent-Type: application/x-sqlite3\r\n\r\n`], { type: '' });
+    const blobPart2 = new Blob([`\r\n--${boundary}--\r\n`], { type: '' });
     const blob = new Blob([blobPart1, file, blobPart2], { type: `multipart/related; boundary=${boundary}` });
-    const res = await request(API_FILES + '?uploadType=multipart', { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body: blob });
+    const res = await request(UPLOAD_FILES + '?uploadType=multipart', { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body: blob });
     const data = await res.json();
     saveMeta({ fileId: data.id, fileName: data.name || 'budget.db' });
     return { fileId: data.id, fileName: data.name || 'budget.db' };
@@ -130,12 +139,13 @@
   async function connect() {
     const file = await findFile();
     if (file) saveMeta({ fileId: file.id, fileName: file.name || 'budget.db' });
+    else saveMeta({ fileId: '' });
     return file;
   }
 
   window.Drive = {
     getClientId() { return getMeta().clientId; },
-    saveClientId(clientId) { saveMeta({ clientId: (clientId || '').trim() }); return getMeta(); },
+    saveClientId(clientId) { cachedToken = null; tokenExpiresAt = 0; saveMeta({ clientId: (clientId || '').trim() }); return getMeta(); },
     isConnected() { return Boolean(getMeta().clientId && getMeta().fileId); },
     status() { const m = getMeta(); return { hasClient: Boolean(m.clientId), hasFile: Boolean(m.fileId), fileName: m.fileName, fileId: m.fileId }; },
     async upload(bytes) { return await uploadBytes(bytes); },
