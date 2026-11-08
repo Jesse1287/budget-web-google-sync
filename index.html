@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#17a2b8">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Budget">
+<meta name="format-detection" content="telephone=no">
+<title>Budget</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+body { background-color: #f8f9fa; }
+.card { border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,.08); }
+.nav-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.nav-tabs .nav-link { cursor: pointer; white-space: nowrap; }
+.neg { color: #b02a37; }
+.pos { color: #1e7e34; }
+.tx-child td { background: #faf9f7; border-top-style: dotted; }
+.over { background: #fdecea; }
+.cat-select { max-width: 160px; }
+.pk-row.pk-unnamed .pk-cat-name { border-color: #fd7e14; box-shadow: 0 0 0 .15rem rgba(253,126,0.25); }
+.table td, .table th { font-size: .9rem; }
+@media (max-width: 576px) { .table td, .table th { font-size: .8rem; padding: .4rem .3rem; } }
+@supports (padding: env(safe-area-inset-top)) { body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); } }
+.landing-card { max-width: 480px; }
+.env-chips .badge { font-weight: normal; }
+</style>
+</head>
+<body>
+
+<div id="landing" class="container py-5 d-none">
+  <div class="row justify-content-center">
+    <div class="col-12 col-md-8">
+      <div class="card landing-card mx-auto">
+        <div class="card-body p-4">
+          <h3 class="text-center mb-1">Budget</h3>
+          <p class="text-muted text-center small mb-4">Start a budget on this device, open an existing <code>.db</code> file, or open one from Google Drive.</p>
+          <button id="land-create" class="btn btn-success w-100 mb-2">Create a new budget</button>
+          <button id="land-open-file" class="btn btn-outline-primary w-100 mb-2">Open a .db file</button>
+          <button id="land-open-drive" class="btn btn-outline-info w-100">Open from Google Drive</button>
+          <div id="land-status" class="small mt-3"></div>
+          <p class="text-muted small mt-4 mb-0">A fresh budget starts empty. Add categories in Settings, then start tracking.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="file-input" accept=".db,.sqlite,.sqlite3,application/octet-stream" class="d-none">
+
+<div id="app" class="container-fluid py-3 d-none" style="max-width:1200px">
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div class="d-flex gap-2 align-items-center flex-wrap">
+      <span class="badge bg-primary fs-6">Balance <span id="balance"></span></span>
+      <span id="data-name" class="small text-muted"></span>
+      <span id="data-saved" class="small text-muted"></span>
+    </div>
+    <div class="d-flex gap-2 align-items-center flex-wrap">
+      <button class="btn btn-outline-secondary btn-sm" type="button" id="data-save">Save</button>
+      <button class="btn btn-outline-secondary btn-sm" type="button" id="data-reload">Reload</button>
+      <button class="btn btn-outline-secondary btn-sm" type="button" id="data-download">Download</button>
+      <button class="btn btn-outline-info btn-sm" type="button" id="data-drive">Drive</button>
+      <button class="btn btn-outline-primary btn-sm" type="button" id="period-btn">New period</button>
+    </div>
+  </div>
+
+  <div id="tab-allocate" class="mb-3 d-none">
+    <div class="card">
+      <div class="card-header bg-white"><h5 class="mb-0">New period — close &amp; start a new one</h5></div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">This rolls each category's balance forward to a fresh period and <strong>clears the previous period's transaction detail</strong>. Each category is pre-filled with its current available balance. A local backup is saved first, and the current budget is uploaded to Google Drive if connected.</p>
+        <p class="text-muted small mb-3">Adding checks or other income is done on the Transactions tab: set <strong>Type = Income</strong>, pick the check, and it auto-fills.</p>
+        <form id="close-form" class="row g-2">
+          <div class="col-6 col-md-3">
+            <label class="form-label small mb-0">New period date</label>
+            <input type="date" class="form-control form-control-sm" id="close-date" required>
+          </div>
+          <div class="col-6 col-md-9 d-flex align-items-end">
+            <button class="btn btn-outline-secondary btn-sm" type="button" id="close-load">Load current balances</button>
+          </div>
+          <div class="col-12">
+            <div class="row g-2" id="close-grid"></div>
+            <div class="d-flex justify-content-between align-items-center mt-3 flex-wrap gap-2">
+              <span id="close-total" class="small"></span>
+              <div class="d-flex align-items-center gap-2">
+                <span id="close-status" class="small"></span>
+                <button class="btn btn-danger btn-sm" id="close-submit" type="submit">Close &amp; start new</button>
+              </div>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <ul class="nav nav-tabs mb-3">
+    <li class="nav-item"><a class="nav-link active" data-tab="categories" href="#">Categories</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="transactions" href="#">Transactions</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="review" href="#"><span id="review-name">Needs Review</span> (<span id="review-count">0</span>)</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="paychecks" href="#">Paychecks</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="report" href="#">Report</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="settings" href="#">Settings</a></li>
+  </ul>
+
+  <div class="card mb-3 d-none" id="add-panel">
+    <div class="card-body py-2">
+      <form id="add-form" class="row g-2 align-items-end">
+        <div class="col-6 col-md-2">
+          <label class="form-label small mb-0">Date</label>
+          <input type="date" class="form-control form-control-sm" id="add-date" required>
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label small mb-0">Description</label>
+          <input type="text" class="form-control form-control-sm" id="add-desc" list="hint-list" placeholder="Walmart" required>
+          <datalist id="hint-list"></datalist>
+        </div>
+        <div class="col-4 col-md-2">
+          <label class="form-label small mb-0">Amount</label>
+          <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="add-amount" placeholder="0.00" required>
+        </div>
+        <div class="col-4 col-md-2">
+          <label class="form-label small mb-0">Type</label>
+          <select class="form-select form-select-sm" id="add-type">
+            <option value="expense">Expense</option>
+            <option value="income">Income</option>
+          </select>
+        </div>
+        <div class="col-4 col-md-2" id="add-cat-wrap">
+          <label class="form-label small mb-0">Category</label>
+          <select class="form-select form-select-sm" id="add-category"></select>
+        </div>
+        <div class="col-6 col-md-3 d-none" id="add-check-wrap">
+          <label class="form-label small mb-0">Which check?</label>
+          <select class="form-select form-select-sm" id="add-check">
+            <option value="">— choose a saved check —</option>
+          </select>
+        </div>
+        <div class="col-12 col-md-1 d-grid">
+          <button class="btn btn-success btn-sm" type="submit">Add</button>
+        </div>
+        <div class="col-12 d-none" id="add-split-panel">
+          <hr class="my-1">
+          <label class="form-label small mb-2">Allocate income across categories <span class="text-muted">(auto-filled from the check — edit as needed)</span></label>
+          <div class="row g-2" id="inc-grid"></div>
+          <div class="d-flex justify-content-between align-items-center mt-2 flex-wrap gap-2">
+            <span id="inc-total" class="small"></span>
+            <span id="add-status" class="small"></span>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="tab-categories">
+    <div class="card">
+      <div class="card-body p-2">
+        <p class="text-muted small mb-1">What's left in each category after paychecks and spending.</p>
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>Category</th><th class="text-end">Balance</th></tr></thead>
+          <tbody id="envelope-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-transactions" class="d-none">
+    <div class="d-flex gap-2 mb-2 flex-wrap">
+      <select id="tx-filter-type" class="form-select form-select-sm" style="width:auto">
+        <option value="expense">Expenses</option>
+        <option value="income">Income</option>
+        <option value="all">All</option>
+      </select>
+      <select id="tx-filter-category" class="form-select form-select-sm cat-select"></select>
+      <input type="search" id="tx-search" class="form-control form-control-sm" placeholder="Search description" style="max-width:220px">
+      <input type="date" id="tx-from" class="form-control form-control-sm" style="max-width:160px">
+      <input type="date" id="tx-to" class="form-control form-control-sm" style="max-width:160px">
+    </div>
+    <div class="card">
+      <div class="card-body p-2">
+        <div class="table-responsive">
+          <table class="table table-sm table-hover mb-0">
+            <thead><tr><th>Date</th><th>Description</th><th>Category</th><th class="text-end">Amount</th><th></th></tr></thead>
+            <tbody id="tx-body"></tbody>
+          </table>
+        </div>
+        <div class="text-center py-2"><button class="btn btn-outline-secondary btn-sm" id="tx-more">Load more</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-review" class="d-none">
+    <div class="card">
+      <div class="card-body p-2">
+        <p class="text-muted small mb-2">Expenses the app couldn't categorize. Pick a category (or split) for each.</p>
+        <div id="review-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-paychecks" class="d-none">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h6 class="mb-0 text-muted">Saved checks and income templates — edit anytime; changes apply next time you use them.</h6>
+      <button class="btn btn-outline-primary btn-sm" id="pk-new">+ New check</button>
+    </div>
+    <div class="row g-3" id="paycheck-cards"></div>
+  </div>
+
+  <div id="tab-report" class="d-none">
+    <div class="d-flex gap-2 align-items-center mb-2 flex-wrap">
+      <input type="month" id="report-month" class="form-control form-control-sm" style="width:auto">
+      <span class="text-muted small">Covers what's been entered since the last <em>New Period</em>.</span>
+    </div>
+    <div id="report-body"></div>
+  </div>
+
+  <div id="tab-settings" class="d-none">
+    <div class="row g-3">
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5>Categories</h5>
+            <p class="text-muted small">Envelope list used for paychecks and income splits. Categories already used in transactions remain available even if removed from this list.</p>
+            <div id="env-chips" class="mb-2 env-chips"></div>
+            <div class="input-group input-group-sm">
+              <input id="env-new" class="form-control" placeholder="New category">
+              <button id="env-add" class="btn btn-outline-primary">Add</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5>Review category</h5>
+            <p class="text-muted small">Uncategorized expenses land here. Changing the name moves existing review items to the new name.</p>
+            <div class="input-group input-group-sm mb-2">
+              <input id="review-cat" class="form-control">
+              <button id="settings-save" class="btn btn-outline-primary">Save</button>
+            </div>
+            <span id="settings-status" class="small"></span>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5>Google Drive</h5>
+            <p class="text-muted small">Save a Google OAuth client ID authorized for this site's origin, then connect to sync <code>budget.db</code>.</p>
+            <div class="input-group input-group-sm mb-2">
+              <input id="drive-client" class="form-control" placeholder="OAuth client ID">
+              <button id="drive-save-client" class="btn btn-outline-secondary">Save ID</button>
+            </div>
+            <div class="d-flex gap-2 flex-wrap mb-2">
+              <button id="drive-connect" class="btn btn-outline-info btn-sm">Connect</button>
+              <button id="drive-open" class="btn btn-outline-secondary btn-sm">Open latest</button>
+              <button id="drive-upload" class="btn btn-success btn-sm">Upload current</button>
+            </div>
+            <span id="drive-status" class="small text-muted"></span>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5>Data</h5>
+            <p class="text-muted small">The budget is stored in this browser and can be downloaded as a <code>.db</code> file.</p>
+            <div class="d-flex gap-2 flex-wrap">
+              <button id="data-save2" class="btn btn-outline-secondary btn-sm">Save now</button>
+              <button id="data-reload2" class="btn btn-outline-secondary btn-sm">Reload saved</button>
+              <button id="data-download2" class="btn btn-outline-secondary btn-sm">Download .db</button>
+              <button id="data-new" class="btn btn-outline-danger btn-sm">Start fresh</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<datalist id="pk-envelopes"></datalist>
+
+<div class="modal fade" id="split-modal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Split transaction</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p id="split-desc" class="small text-muted"></p>
+        <div id="split-parts"></div>
+        <button class="btn btn-link btn-sm p-0" id="split-add-part">+ Add part</button>
+        <p class="small mt-2">Total: <span id="split-total"></span> / <span id="split-target"></span></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="split-save">Split</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="edit-modal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Edit transaction</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="row g-2">
+          <div class="col-6"><label class="form-label small mb-0">Date</label><input type="date" class="form-control form-control-sm" id="edit-date"></div>
+          <div class="col-6"><label class="form-label small mb-0">Amount</label><input type="number" step="0.01" class="form-control form-control-sm" id="edit-amount"></div>
+          <div class="col-12"><label class="form-label small mb-0">Description</label><input class="form-control form-control-sm" id="edit-desc" list="hint-list"></div>
+          <div class="col-12" id="edit-cat-wrap"><label class="form-label small mb-0">Category</label><select class="form-select form-select-sm" id="edit-cat"></select></div>
+        </div>
+        <div class="d-none" id="edit-parts">
+          <label class="form-label small mb-0">Parts <span class="text-muted">(total updates below)</span></label>
+          <div id="edit-parts-rows"></div>
+          <button type="button" class="btn btn-link btn-sm p-0" id="edit-add-part">+ Add part</button>
+          <p class="small mt-1 mb-0">Parts total: <span id="edit-parts-total"></span></p>
+        </div>
+        <p id="edit-note" class="small text-muted mt-2 mb-0"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="edit-save">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>window.SQLJS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
+<script src="backend.js"></script>
+<script src="drive.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

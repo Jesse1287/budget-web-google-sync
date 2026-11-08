@@ -1,0 +1,5 @@
+.DS_Store
+reference/
+node_modules/
+.smoke/
+.deploy.js
