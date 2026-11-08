@@ -143,6 +143,16 @@
     return file;
   }
 
+  async function debug() {
+    const meta = getMeta();
+    if (!meta.clientId) throw new Error('No client ID saved.');
+    const t = await getToken();
+    const res = await fetch('https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=' + encodeURIComponent(t));
+    let info = null;
+    try { info = await res.json(); } catch (e) {}
+    return { tokenLength: t.length, tokenPrefix: t.slice(0, 8), tokenInfoStatus: res.status, tokenInfo: info };
+  }
+
   window.Drive = {
     getClientId() { return getMeta().clientId; },
     saveClientId(clientId) { cachedToken = null; tokenExpiresAt = 0; saveMeta({ clientId: (clientId || '').trim() }); return getMeta(); },
@@ -150,6 +160,7 @@
     status() { const m = getMeta(); return { hasClient: Boolean(m.clientId), hasFile: Boolean(m.fileId), fileName: m.fileName, fileId: m.fileId }; },
     async upload(bytes) { return await uploadBytes(bytes); },
     async connect() { return await connect(); },
+    debug,
     async openLatest() {
       const file = await findFile();
       if (!file) throw new Error('No budget.db found in Google Drive.');
