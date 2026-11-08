@@ -1180,6 +1180,9 @@ $('tx-more').addEventListener('click', async () => {
   if (!txDone) await loadTransactions(false).catch(err => alert(err.message));
 });
 
+wireTxBody();
+wireReviewBody();
+
 $('split-add-part').addEventListener('click', addSplitPart);
 $('split-save').addEventListener('click', saveSplit);
 $('split-parts').addEventListener('input', updateSplitTotal);
@@ -1304,7 +1307,7 @@ document.addEventListener('visibilitychange', () => {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js?v=6', { updateViaCache: 'none' }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=7', { updateViaCache: 'none' }).catch(() => {});
   });
 }
 
