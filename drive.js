@@ -39,12 +39,38 @@
     if (!meta.clientId) throw new Error('Save a Google OAuth client ID first.');
     await loadScript();
     if (!authPromise) {
-      authPromise = window.google.accounts.oauth2.initTokenClient({
-        client_id: meta.clientId,
-        scope: 'https://www.googleapis.com/auth/drive.file',
-        callback: () => {}
-      }).requestAccessToken();
-      authPromise = authPromise.catch(err => { authPromise = null; throw err; });
+      authPromise = new Promise((resolve, reject) => {
+        let settled = false;
+        const client = window.google.accounts.oauth2.initTokenClient({
+          client_id: meta.clientId,
+          scope: 'https://www.googleapis.com/auth/drive.file',
+          callback: (response) => {
+            if (settled) return;
+            if (response && response.error) {
+              settled = true;
+              authPromise = null;
+              reject(new Error(response.error_description || response.error || 'Drive sign-in was denied'));
+              return;
+            }
+            if (response && response.access_token) {
+              settled = true;
+              token = response.access_token;
+              resolve(token);
+              return;
+            }
+            settled = true;
+            authPromise = null;
+            reject(new Error('Drive sign-in did not return a token.'));
+          },
+          error_callback: (err) => {
+            if (settled) return;
+            settled = true;
+            authPromise = null;
+            reject(err instanceof Error ? err : new Error((err && err.message) || 'Drive sign-in was cancelled.'));
+          }
+        });
+        client.requestAccessToken();
+      });
     }
     const res = await authPromise;
     authPromise = null;
