@@ -143,10 +143,15 @@
     const file = new Uint8Array(bytes);
     let fileId = fileName === 'budget.db' ? meta.fileId : null;
     if (fileId) {
-      const res = await request(UPLOAD_FILES + '/' + fileId, { method: 'PUT', headers: { 'Content-Type': 'application/x-sqlite3' }, body: file }, interactive);
-      const data = await res.json();
-      saveMeta({ fileId: data.id, fileName: data.name || 'budget.db' });
-      return { fileId: data.id, fileName: data.name || 'budget.db' };
+      try {
+        const res = await request(UPLOAD_FILES + '/' + fileId + '?uploadType=media', { method: 'PATCH', headers: { 'Content-Type': 'application/x-sqlite3' }, body: file }, interactive);
+        const data = await res.json();
+        saveMeta({ fileId: data.id, fileName: data.name || 'budget.db' });
+        return { fileId: data.id, fileName: data.name || 'budget.db' };
+      } catch (e) {
+        if (e.status !== 404) throw e;
+        saveMeta({ fileId: '' });
+      }
     }
     const boundary = 'budget' + Date.now();
     const metaJson = JSON.stringify({ name: fileName, mimeType: 'application/x-sqlite3' });

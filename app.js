@@ -1307,7 +1307,7 @@ document.addEventListener('visibilitychange', () => {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js?v=7', { updateViaCache: 'none' }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=8', { updateViaCache: 'none' }).catch(() => {});
   });
 }
 
