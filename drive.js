@@ -43,7 +43,7 @@
         client_id: meta.clientId,
         scope: 'https://www.googleapis.com/auth/drive.file',
         callback: () => {}
-      }).requestAuthorization({ prompt: '' });
+      }).requestAccessToken();
       authPromise = authPromise.catch(err => { authPromise = null; throw err; });
     }
     const res = await authPromise;
