@@ -714,8 +714,8 @@ async function pkDelete(card) {
   btn.disabled = true;
   try {
     await api('/api/paychecks/' + id, { method: 'DELETE' });
-    await loadPaychecks();
-    await loadIncomeChecks();
+    await loadCategories(true);
+    await refreshApp();
   } catch (e) {
     pkStatus(st, 'text-danger', e.message);
     btn.disabled = false;
@@ -748,8 +748,8 @@ async function pkSave(card) {
   try {
     await japi('/api/paychecks/' + card.dataset.id, 'PATCH', data);
     pkStatus(st, 'text-success', 'Saved.');
-    await loadPaychecks();
-    await loadIncomeChecks();
+    await loadCategories(true);
+    await refreshApp();
   } catch (e) {
     pkStatus(st, 'text-danger', e.message);
     pkUpdateSum(card);
@@ -787,8 +787,8 @@ async function pkCreate(card) {
   try {
     await japi('/api/paychecks', 'POST', data);
     pkStatus(st, 'text-success', 'Created.');
-    await loadPaychecks();
-    await loadIncomeChecks();
+    await loadCategories(true);
+    await refreshApp();
   } catch (e) {
     pkStatus(st, 'text-danger', e.message);
     pkUpdateSum(card);
@@ -1086,6 +1086,7 @@ $('close-form').addEventListener('submit', async e => {
     await japi('/api/period/close', 'POST', { date: $('close-date').value, amounts });
     closeGridLoaded = false;
     $('close-grid').innerHTML = '';
+    await loadCategories(true);
     await refreshApp();
     $('tab-allocate').classList.add('d-none');
     setCloseStatus('Closed. A fresh period started.', 'text-success');
@@ -1160,6 +1161,7 @@ $('add-form').addEventListener('submit', async e => {
     if (wasIncome) { buildIncomeGrid(null); updateIncTotal(); }
     status.textContent = 'Added.';
     status.className = 'small text-success';
+    await loadCategories(true);
     await refreshApp();
   } catch (err) {
     status.textContent = err.message;
@@ -1302,7 +1304,7 @@ document.addEventListener('visibilitychange', () => {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js?v=5', { updateViaCache: 'none' }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=6', { updateViaCache: 'none' }).catch(() => {});
   });
 }
 

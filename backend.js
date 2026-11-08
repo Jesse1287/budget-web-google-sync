@@ -144,13 +144,22 @@ const Backend = {
         const c = this.cfg();
         const extras = this.qAll('SELECT DISTINCT category FROM transactions WHERE category != ? AND category != ?',
             [c.review_category, PARENT_MARKER]).map(r => r.category);
+        this.qAll('SELECT DISTINCT category FROM paycheck_allocations WHERE category != ? AND category != ?',
+            [c.review_category, PARENT_MARKER]).forEach(r => {
+                if (!extras.includes(r.category)) extras.push(r.category);
+            });
         return c.envelopes.concat(extras.filter(x => !c.envelopes.includes(x)));
     },
 
     categories() {
         const c = this.cfg();
         const inDb = this.qAll('SELECT DISTINCT category FROM transactions WHERE category != ? AND category != ?',
-            [c.review_category, PARENT_MARKER]).map(r => r.category).sort();
+            [c.review_category, PARENT_MARKER]).map(r => r.category);
+        this.qAll('SELECT DISTINCT category FROM paycheck_allocations WHERE category != ? AND category != ?',
+            [c.review_category, PARENT_MARKER]).forEach(r => {
+                if (!inDb.includes(r.category)) inDb.push(r.category);
+            });
+        inDb.sort();
         const out = c.envelopes.slice();
         if (!out.includes(c.review_category)) out.push(c.review_category);
         inDb.forEach(x => { if (!out.includes(x)) out.push(x); });
