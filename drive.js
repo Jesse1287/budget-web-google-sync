@@ -3,7 +3,7 @@
   // One owner-configured client ID is bundled. Users sign in with their own
   // Google account; a refresh token keeps the connection alive without
   // re-consenting. Drive is the durable store; browser storage is a cache.
-  const BUNDLED_CLIENT_ID = '807813400626-uoihghs0oj9fk47a8o1tgsb3jjacp9es.apps.googleusercontent.com';
+  const BUNDLED_CLIENT_ID = '807813400626-v1uho4bh1rtec8fhidb49shgr23mrpjj.apps.googleusercontent.com';
   const SCOPES = 'https://www.googleapis.com/auth/drive.file openid email profile';
   const REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
   const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';

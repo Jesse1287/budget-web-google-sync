@@ -23,7 +23,7 @@ Open `http://localhost:8080`.
 Deploy this directory as a project site. Use relative paths and ensure the repository is public for free GitHub Pages.
 
 ## Google Drive
-Users sign in with their own Google account on first launch; no IDs or scopes to configure. The owner maintains one OAuth client (authorization code + PKCE, `drive.file` scope) with the app's deployed origin/redirect URIs; the client ID is bundled in `drive.js`.
+Users sign in with their own Google account on first launch; no IDs or scopes to configure. The owner maintains one OAuth client — a **Desktop application** type (public client, authorization code + PKCE, `drive.file` scope, no client secret) in the same GCP project; the client ID is bundled in `drive.js`. Desktop clients accept any redirect URI, so both `localhost` and the deployed origin work without extra configuration.
 
 ## Files
 - `index.html` — UI
