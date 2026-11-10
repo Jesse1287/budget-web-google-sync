@@ -23,12 +23,19 @@ Open `http://localhost:8080`.
 Deploy this directory as a project site. Use relative paths and ensure the repository is public for free GitHub Pages.
 
 ## Google Drive
-Users sign in with their own Google account on first launch; no IDs or scopes to configure. The owner maintains one OAuth client — a **Desktop application** type (public client, authorization code + PKCE, `drive.file` scope, no client secret) in the same GCP project; the client ID is bundled in `drive.js`. Desktop clients accept any redirect URI, so both `localhost` and the deployed origin work without extra configuration.
+Users sign in with their own Google account on first launch; no IDs or scopes to configure. The owner maintains one OAuth client in GCP project `807813400626`:
+
+- Type: **Web application** (the only type that accepts a `https://` origin such as GitHub Pages).
+- **Authorized JavaScript origins**: `https://jesse1287.github.io` and `http://localhost:8080`. Required — the sign-in popup is origin-checked.
+- Authorized redirect URIs are not used by this app (the token model has no redirect), but keeping the site origin there is harmless.
+- Scopes: `drive.file`, `userinfo.email`, `userinfo.profile`.
+
+The client ID is bundled in `drive.js`. Sign-in uses **Google Identity Services' OAuth 2.0 token model** (`initTokenClient`): a popup returns a short-lived access token (~1 hour) straight to the page, so there is **no client secret and no backend**. The token is renewed silently from the Google session already in the browser (on the next tap after it ages out, or when the app returns to the foreground); when Google requires interaction the app shows a **Sign in with Google** button. Consequently there is no long-lived refresh token: a device that stays closed for a long time needs one tap to reconnect, and popups must be allowed for the site.
 
 ## Files
 - `index.html` — UI
 - `app.js` — frontend behavior and two-way sync orchestration
 - `backend.js` — browser SQL.js data layer
-- `drive.js` — Google sign-in (OAuth code + PKCE) and Drive sync
+- `drive.js` — Google sign-in (GIS token model) and Drive sync
 - `manifest.json` — PWA manifest
 - `sw.js` — service worker

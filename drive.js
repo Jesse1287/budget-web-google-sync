@@ -1,13 +1,19 @@
 (function () {
-  // Google Drive sync with OAuth 2.0 authorization-code flow + PKCE (no backend).
-  // One owner-configured client ID is bundled. Users sign in with their own
-  // Google account; a refresh token keeps the connection alive without
-  // re-consenting. Drive is the durable store; browser storage is a cache.
-  const BUNDLED_CLIENT_ID = '807813400626-v1uho4bh1rtec8fhidb49shgr23mrpjj.apps.googleusercontent.com';
-  const SCOPES = 'https://www.googleapis.com/auth/drive.file openid email profile';
-  const REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
-  const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
-  const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+  // Google Drive sync via Google Identity Services' OAuth 2.0 token model.
+  //
+  // No backend, no client secret, no redirect URI: one owner-configured
+  // Web-application client ID is bundled, and each user signs in with their own
+  // Google account in a GIS popup. The popup hands this page a short-lived
+  // access token (about an hour), which is renewed silently from the Google
+  // session already in the browser; when that is not possible the user signs in
+  // again with one tap. Drive is the durable store; browser storage is a cache.
+  const BUNDLED_CLIENT_ID = '807813400626-uoihghs0oj9fk47a8o1tgsb3jjacp9es.apps.googleusercontent.com';
+  const SCOPES = [
+    'https://www.googleapis.com/auth/drive.file',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile'
+  ].join(' ');
+  const USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
   const API_FILES = 'https://www.googleapis.com/drive/v3/files';
   const UPLOAD_FILES = 'https://www.googleapis.com/upload/drive/v3/files';
 
@@ -24,8 +30,6 @@
     uploaded: 'budget.gsync.local_uploaded'
   };
   const LEGACY_FILE_ID = 'budget.drive.file_id';
-  const VERIFIER_KEY = 'budget.gsync.code_verifier';
-  const STATE_KEY = 'budget.gsync.state';
 
   let cachedToken = null;
   let tokenExpiresAt = 0;
@@ -53,66 +57,143 @@
     if (fileId) clearLegacy(); // file is reachable through the new keys now
   }
 
-  // ---------- PKCE helpers ----------
+  // ---------- sign-in (Google Identity Services, token model) ----------
 
-  function b64url(bytes) {
-    let bin = '';
-    bytes.forEach(b => { bin += String.fromCharCode(b); });
-    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let gisPromise = null;
+  let tokenClient = null;
+  let pending = null;
+  let inFlight = null;
+  let renewing = false;
+  let lastRenewAt = 0;
+
+  function oauth2() {
+    return (window.google && window.google.accounts && window.google.accounts.oauth2) || null;
   }
 
-  function randomBytes(n) {
-    const arr = new Uint8Array(n);
-    crypto.getRandomValues(arr);
-    return arr;
+  function loadGis() {
+    if (oauth2()) return Promise.resolve(oauth2());
+    if (gisPromise) return gisPromise;
+    gisPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://accounts.google.com/gsi/client';
+      s.async = true;
+      s.defer = true;
+      s.onload = () => { oauth2() ? resolve(oauth2()) : reject(new Error('Google sign-in did not load.')); };
+      s.onerror = () => { gisPromise = null; reject(new Error('Could not reach Google sign-in. Check your connection and try again.')); };
+      document.head.appendChild(s);
+    });
+    return gisPromise;
   }
 
-  async function sha256b64url(text) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-    return b64url(new Uint8Array(buf));
+  function tokenClientFor(g) {
+    if (!tokenClient) {
+      tokenClient = g.initTokenClient({
+        client_id: BUNDLED_CLIENT_ID,
+        scope: SCOPES,
+        callback: onToken,
+        error_callback: onAuthError
+      });
+    }
+    return tokenClient;
   }
 
-  // ---------- sign-in ----------
-
-  function buildAuthUrl(prompt) {
-    const verifier = b64url(randomBytes(48)); // 64 chars, within 43..128
-    const state = b64url(randomBytes(16));
-    sessionStorage.setItem(VERIFIER_KEY, verifier);
-    sessionStorage.setItem(STATE_KEY, state);
-    return { verifier, state };
+  function onToken(resp) {
+    const p = pending;
+    pending = null;
+    if (!p) return;
+    if (resp && resp.access_token) p.resolve(resp);
+    else p.reject(new Error((resp && (resp.error_description || resp.error)) || 'Google sign-in did not return an access token.'));
   }
+
+  function onAuthError(err) {
+    const p = pending;
+    pending = null;
+    if (!p) return;
+    const type = (err && (err.type || err.error)) || '';
+    const e = new Error(
+      type === 'popup_closed' ? 'The Google sign-in window was closed before finishing.' :
+      type === 'popup_failed_to_open' ? 'The browser blocked the Google sign-in window. Allow pop-ups for this site and try again.' :
+      'Google sign-in could not start (' + (type || 'unknown error') + ').'
+    );
+    e.code = type === 'popup_failed_to_open' ? 'POPUP_BLOCKED' : 'AUTH_ERROR';
+    p.reject(e);
+  }
+
+  function runTokenRequest(prompt) {
+    return loadGis().then(g => new Promise((resolve, reject) => {
+      const client = tokenClientFor(g);
+      pending = { resolve: resolve, reject: reject };
+      try {
+        client.requestAccessToken({ prompt: prompt || '' });
+      } catch (e) {
+        pending = null;
+        reject(e);
+      }
+    }));
+  }
+
+  // GIS answers one request at a time: a silent renewal may still be in flight
+  // when the user clicks Sign in, so queue behind it instead of racing it.
+  function requestToken(prompt) {
+    if (inFlight) return inFlight.then(() => requestToken(prompt), () => requestToken(prompt));
+    const p = runTokenRequest(prompt);
+    const done = () => { if (inFlight === p) inFlight = null; };
+    inFlight = p;
+    p.then(done, done);
+    return p;
+  }
+
+  async function acceptToken(resp) {
+    const secs = Number(resp.expires_in) > 0 ? Number(resp.expires_in) : 3600;
+    cachedToken = resp.access_token;
+    tokenExpiresAt = Date.now() + secs * 1000;
+    lsSet(K.access, cachedToken);
+    lsSet(K.exp, String(tokenExpiresAt));
+    try {
+      const res = await fetch(USERINFO_URL, { headers: { Authorization: 'Bearer ' + cachedToken } });
+      if (res.ok) {
+        const u = await res.json();
+        lsSet(K.account, JSON.stringify({ email: u.email || '', name: u.name || '' }));
+      }
+    } catch (e) { /* the account label is cosmetic */ }
+  }
+
+  function storedToken() { return cachedToken || lsGet(K.access) || ''; }
+  function hasSession() { return Boolean(storedToken()); }
+  function tokenValid() { return Boolean(cachedToken) && Date.now() < tokenExpiresAt - 60000; }
+  function renewalNeeded(bufferMs) { return hasSession() && Date.now() > tokenExpiresAt - (bufferMs || 0); }
 
   async function signIn(opts) {
     opts = opts || {};
-    const { verifier, state } = buildAuthUrl(opts.prompt);
-    const challenge = await sha256b64url(verifier);
-    const p = new URLSearchParams({
-      client_id: BUNDLED_CLIENT_ID,
-      redirect_uri: REDIRECT_URI,
-      response_type: 'code',
-      scope: SCOPES,
-      code_challenge: challenge,
-      code_challenge_method: 'S256',
-      access_type: 'offline',
-      prompt: opts.prompt || (hasRefresh() ? 'select_account' : 'consent'),
-      state: state
-    });
-    location.assign(AUTH_URL + '?' + p.toString());
+    lsDel(K.refresh); // legacy code-flow refresh tokens are no longer usable
+    const prompt = opts.prompt || (account() && hasSession() ? '' : 'consent');
+    const resp = await requestToken(prompt);
+    await acceptToken(resp);
+    return account();
   }
 
-  function storeTokenResponse(data) {
-    if (data.access_token) {
-      cachedToken = data.access_token;
-      tokenExpiresAt = Date.now() + (Number(data.expires_in) > 0 ? Number(data.expires_in) * 1000 : 3600000);
-      lsSet(K.access, cachedToken);
-      lsSet(K.exp, String(tokenExpiresAt));
-    }
-    if (data.refresh_token) lsSet(K.refresh, data.refresh_token);
-    if (data.id_token) {
-      try {
-        const payload = JSON.parse(atob(data.id_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-        lsSet(K.account, JSON.stringify({ email: payload.email || '', name: payload.name || '' }));
-      } catch {}
+  // Sign-in happens in a GIS popup, so there is no redirect callback; a stale
+  // ?code=... URL left over from the old code flow is cleaned up here.
+  function handleCallback() {
+    const p = new URLSearchParams(location.search);
+    if (p.has('code') || p.has('error')) history.replaceState(null, '', location.pathname + location.hash);
+    return null;
+  }
+
+  // Renews the access token from the Google session already in this browser.
+  // GIS shows a popup: it closes by itself while consent is still on file.
+  async function renewToken(quiet) {
+    if (renewing || Date.now() - lastRenewAt < 60000) return null;
+    renewing = true;
+    lastRenewAt = Date.now();
+    try {
+      const resp = await requestToken(quiet ? 'none' : '');
+      await acceptToken(resp);
+      return cachedToken;
+    } catch (e) {
+      return null;
+    } finally {
+      renewing = false;
     }
   }
 
@@ -122,46 +203,7 @@
     [K.access, K.exp, K.refresh, K.account, K.fileId, K.fileName, K.lastPush, K.lastPull, K.remoteMod, K.uploaded].forEach(lsDel);
   }
 
-  // Returns a Promise that resolves with the signed-in account when the page
-  // was loaded from the OAuth redirect (URL contains ?code=...), or null when
-  // the URL is not a callback.
-  function handleCallback() {
-    const p = new URLSearchParams(location.search);
-    const code = p.get('code');
-    const state = p.get('state');
-    const err = p.get('error');
-    if (!code && !err) return null;
-    return (async () => {
-      const expectedState = sessionStorage.getItem(STATE_KEY);
-      const verifier = sessionStorage.getItem(VERIFIER_KEY);
-      sessionStorage.removeItem(STATE_KEY);
-      sessionStorage.removeItem(VERIFIER_KEY);
-      if (err) throw new Error('Google sign-in was cancelled or denied.');
-      if (!verifier) throw new Error('Sign-in session expired — please sign in again.');
-      if (expectedState && state && expectedState !== state) throw new Error('Sign-in state mismatch — please sign in again.');
-      const form = new URLSearchParams({
-        grant_type: 'authorization_code',
-        code: code,
-        redirect_uri: REDIRECT_URI,
-        client_id: BUNDLED_CLIENT_ID,
-        code_verifier: verifier
-      });
-      const res = await fetch(TOKEN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: form.toString()
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.access_token) {
-        throw new Error(data.error_description || data.error || 'Google sign-in failed. Try again.');
-      }
-      storeTokenResponse(data);
-      history.replaceState(null, '', location.pathname + location.hash);
-      return account();
-    })();
-  }
-
-  function hasRefresh() { return Boolean(lsGet(K.refresh)); }
+  function hasRefresh() { return hasSession(); } // keeps the app.js contract
 
   function clearToken() {
     cachedToken = null;
@@ -171,30 +213,15 @@
   }
 
   async function refresh() {
-    const rt = lsGet(K.refresh);
-    if (!rt) throw new Error('Not signed in.');
-    const form = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: rt,
-      client_id: BUNDLED_CLIENT_ID
-    });
-    const res = await fetch(TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: form.toString()
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.access_token) {
-      const revoked = /invalid_grant|revoked/i.test(data.error || data.error_description || '');
-      clearAuth();
-      throw new Error(revoked ? 'Your Google sign-in expired. Please sign in again.' : 'Could not refresh the Google sign-in: ' + (data.error_description || data.error || res.status));
-    }
-    storeTokenResponse(data);
-    return cachedToken;
+    const t = await renewToken(true);
+    if (t) return t;
+    const e = new Error('Your Google sign-in expired. Sign in again to keep syncing.');
+    e.code = 'NOT_SIGNED_IN';
+    throw e;
   }
 
   async function getAccessToken(interactive) {
-    if (cachedToken && Date.now() < tokenExpiresAt - 60000) return cachedToken;
+    if (tokenValid()) return cachedToken;
     const stored = lsGet(K.access);
     const exp = Number(lsGet(K.exp) || 0);
     if (stored && exp > Date.now() + 60000) {
@@ -202,14 +229,17 @@
       tokenExpiresAt = exp;
       return cachedToken;
     }
-    if (hasRefresh()) return await refresh();
+    if (hasSession()) return await refresh();
     const e = new Error('Google sign-in is required.');
     e.code = 'NOT_SIGNED_IN';
     throw e;
   }
 
   function signOut() {
+    const t = storedToken();
     clearAuth();
+    const g = oauth2();
+    if (t && g && g.revoke) { try { g.revoke(t, function () {}); } catch (e) {} }
   }
 
   // ---------- HTTP ----------
@@ -219,9 +249,10 @@
     const res = await fetch(path, Object.assign({}, options, {
       headers: Object.assign({ Authorization: 'Bearer ' + token }, options && options.headers)
     }));
-    if (res.status === 401) {
+    if (res.status === 401 && !retried) {
+      // The token was rejected (expired early or revoked): ask GIS for a new one.
       clearToken();
-      if (!retried && hasRefresh()) return await request(path, options, interactive, true);
+      if (await renewToken(false)) return await request(path, options, interactive, true);
     }
     if (!res.ok) {
       let msg = res.statusText;
@@ -359,6 +390,33 @@
     return { tokenLength: t.length, tokenPrefix: t.slice(0, 8), hasRefresh: hasRefresh(), tokenInfoStatus: res.status, tokenInfo: info };
   }
 
+  // ---------- session upkeep ----------
+
+  // Restore the token this browser saved: GIS tokens last about an hour.
+  (function restoreSession() {
+    const t = lsGet(K.access);
+    const exp = Number(lsGet(K.exp) || 0);
+    if (t && exp > Date.now()) { cachedToken = t; tokenExpiresAt = exp; }
+    lsDel(K.refresh); // legacy code-flow refresh token: unusable without a secret
+  })();
+
+  // Renew before the token dies, on the next user gesture so the popup is not
+  // blocked, or when the app comes back to the foreground.
+  function onGestureRenew(e) {
+    const t = e && e.target;
+    if (t && t.closest && t.closest('#land-signin, #sync-signin')) return;
+    if (renewing || inFlight || !renewalNeeded(8 * 60 * 1000)) return;
+    renewToken(false);
+  }
+  document.addEventListener('pointerdown', onGestureRenew, true);
+  document.addEventListener('keydown', onGestureRenew, true);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !renewing && !inFlight && renewalNeeded(60 * 1000)) renewToken(true);
+  });
+
+  // Warm the GIS library so the first popup is never blocked by a late load.
+  loadGis().catch(() => {});
+
   window.Drive = {
     // auth
     signIn: signIn,
@@ -366,6 +424,7 @@
     signOut: signOut,
     account: account,
     hasRefresh: hasRefresh,
+    tokenValid: tokenValid,
     // sync primitives
     fileMeta: fileMeta,
     push: push,

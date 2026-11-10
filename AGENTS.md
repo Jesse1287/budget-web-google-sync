@@ -4,13 +4,13 @@ Zero-based envelope budgeting PWA. **No backend**: Google Drive holds the durabl
 
 ## Stack
 
-Plain JS, no bundler. `index.html` loads bootstrap@5.3.0 + sql.js@1.10.3 from the jsDelivr CDN, then `backend.js` → `drive.js` → `app.js` (all with `?v=9` cache-busting).
+Plain JS, no bundler. `index.html` loads bootstrap@5.3.0 + sql.js@1.10.3 from the jsDelivr CDN, then `backend.js` → `drive.js` → `app.js` (all with `?v=10` cache-busting). `drive.js` lazily loads `https://accounts.google.com/gsi/client` itself, so there is no extra script tag to manage.
 
 - `index.html` — UI (Bootstrap 5)
 - `app.js` — frontend behavior + two-way Drive sync orchestration
 - `backend.js` — SQL.js (WASM SQLite) data layer; `budget.db` is a plain SQLite file
-- `drive.js` — Google sign-in (OAuth code + PKCE) and Drive sync
-- `manifest.json` / `sw.js` — PWA; service-worker cache is named `roux-budget-web-v9`
+- `drive.js` — Google sign-in (Google Identity Services token model) and Drive sync
+- `manifest.json` / `sw.js` — PWA; service-worker cache is named `roux-budget-web-v10`
 - `icons/` — PWA icons
 - `reference/` — **gitignored**, local-only copy of the old Flask/Docker version, kept for reference; never deployed
 
@@ -18,11 +18,12 @@ Personal financial data (`budget.db`) is intentionally **not** in this repositor
 
 ## Google Drive OAuth — critical constraints
 
-- One owner-maintained OAuth client: **Desktop application type** (public client), GCP project `807813400626`, scopes `drive.file` + `openid email profile`. The client ID is bundled at `drive.js:6`.
-- Flow is authorization code + PKCE (S256). **There is no client secret anywhere** — public client; token requests send only `client_id` + `code_verifier` (code exchange and refresh).
-- **If the client ID is ever replaced, the replacement must be a public type (Desktop/Android/iOS/TV).** A "Web application" type client makes the token exchange fail with `invalid_client` / "Client Secret is required, please provide your client secret." This exact bug hit 2026-11-10: the old client `807813400626-uoihghs0oj9fk47a8o1tgsb3jjacp9es` was Web-application type and broke sign-in; it was replaced with the current Desktop-type client `807813400626-v1uho4bh1rtec8fhidb49shgr23mrpjj`.
-- Desktop clients need **no authorized redirect URIs**: the app computes the redirect as `location.origin + location.pathname` (minus `index.html`), so `localhost:8080` and any GitHub Pages origin work with zero console configuration.
-- Tokens live in `localStorage` under `budget.gsync.*` keys. After a client-ID change, old refresh tokens fail with `invalid_grant` — the app auto-clears auth and prompts one-time re-consent. That is expected migration cost, not a bug.
+- One owner-maintained OAuth client: **Web application type**, GCP project `807813400626`, client ID `807813400626-uoihghs0oj9fk47a8o1tgsb3jjacp9es` bundled at `drive.js:10`. Scopes `drive.file`, `userinfo.email`, `userinfo.profile`.
+- Flow is the **Google Identity Services (GIS) token model**: `google.accounts.oauth2.initTokenClient(...)` in a popup returns an access token (~1 h) directly to the page. **No client secret, no redirect URI, no backend** — that is why a Web-application client (which normally demands a secret for the code flow) is usable here.
+- **The client must list the app origins under "Authorized JavaScript origins"** (`https://jesse1287.github.io`, `http://localhost:8080`). GIS rejects unlisted origins. This is the only console-side configuration the app needs.
+- **Avoid the authorization-code + PKCE flow for this app.** It needs a confidential client (Web type → `invalid_client` / "Client Secret is required"), while the public client types (Desktop/Android/iOS/TV) only accept loopback redirect URIs, so a Desktop client always fails on GitHub Pages with `redirect_uri_mismatch`. Both were verified empirically 2026-11-10 against `accounts.google.com/o/oauth2/v2/auth`; the bundled client ID changed three times that day (`uoihghs0…` Web → `v1uho4bh…` Desktop → back to `uoihghs0…` Web).
+- Tokens live in `localStorage` under `budget.gsync.*` keys; there is **no refresh token** with this model. `drive.js` renews silently (`prompt: 'none'`, or on the next user gesture within 8 min of expiry) and surfaces `NOT_SIGNED_IN` when Google needs interaction — the UI then offers "Sign in with Google" (landing screen and Settings). Popups must be allowed for the site.
+- After a client-ID change every signed-in device needs one tap to sign in again; that is expected migration cost, not a bug.
 - Diagnostics: `Drive.debug()` (drive.js) fetches Google tokeninfo for the current access token.
 
 ## Data + sync model

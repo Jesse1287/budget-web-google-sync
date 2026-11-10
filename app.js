@@ -170,6 +170,8 @@ function updateSyncDetail() {
   const s = Drive.status();
   const a = s.account;
   $('sync-account').textContent = a && a.email ? (a.name ? a.name + ' · ' : '') + a.email : (Drive.hasRefresh() ? 'Signed in' : 'Not signed in');
+  const signInBtn = $('sync-signin');
+  if (signInBtn) signInBtn.classList.toggle('d-none', Drive.tokenValid());
   const t = ts => ts ? new Date(ts).toLocaleString() : '—';
   $('drive-status').textContent = 'Last upload: ' + t(s.lastPush) + '  ·  Last download: ' + t(s.lastPull) + '  ·  Google Drive copy modified: ' + t(s.remoteModified);
 }
@@ -206,8 +208,7 @@ async function runDriveSync() {
     updateSyncStatus();
   } catch (e) {
     if (e.code === 'NOT_SIGNED_IN') {
-      updateSyncStatus('Sign-in expired — fix in Settings', 'danger');
-      stopSyncPolling();
+      updateSyncStatus('Sign-in expired — tap Sign in (Settings)', 'danger');
       return;
     }
     updateSyncStatus('Sync error — ' + e.message, 'danger');
@@ -236,8 +237,7 @@ async function pullRemote(msg) {
     updateSyncStatus();
   } catch (e) {
     if (e.code === 'NOT_SIGNED_IN') {
-      updateSyncStatus('Sign-in expired — fix in Settings', 'danger');
-      stopSyncPolling();
+      updateSyncStatus('Sign-in expired — tap Sign in (Settings)', 'danger');
     } else {
       updateSyncStatus('Pull failed — ' + e.message, 'danger');
     }
@@ -275,11 +275,9 @@ async function pollRemote() {
         lastKnownRemoteMod = mod;
       }
     }
+    updateSyncStatus(); // clears "sign-in expired" once a silent renewal lands
   } catch (e) {
-    if (e.code === 'NOT_SIGNED_IN') {
-      updateSyncStatus('Sign-in expired — fix in Settings', 'danger');
-      stopSyncPolling();
-    }
+    if (e.code === 'NOT_SIGNED_IN') updateSyncStatus('Sign-in expired — tap Sign in (Settings)', 'danger');
   }
 }
 
@@ -1160,7 +1158,19 @@ document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
   });
 });
 
-$('land-signin').addEventListener('click', () => Drive.signIn());
+$('land-signin').addEventListener('click', async () => {
+  const btn = $('land-signin');
+  btn.disabled = true;
+  landStatus('Waiting for Google…');
+  try {
+    await Drive.signIn();
+    location.reload();
+  } catch (e) {
+    landStatus(e.message, 'text-danger');
+  } finally {
+    btn.disabled = false;
+  }
+});
 $('land-create').addEventListener('click', createBudget);
 $('land-open-file').addEventListener('click', () => $('file-input').click());
 $('file-input').addEventListener('change', e => {
@@ -1391,6 +1401,15 @@ $('sync-signout').addEventListener('click', () => {
   Drive.signOut();
   location.reload();
 });
+$('sync-signin').addEventListener('click', async () => {
+  try {
+    setSettingsStatus('Waiting for Google…');
+    await Drive.signIn();
+    location.reload();
+  } catch (e) {
+    setSettingsStatus(e.message, 'text-danger');
+  }
+});
 
 $('data-save2').addEventListener('click', () => saveNow().catch(e => alert(e.message)));
 $('data-reload2').addEventListener('click', reloadSaved);
@@ -1407,7 +1426,7 @@ document.addEventListener('visibilitychange', () => {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js?v=9', { updateViaCache: 'none' }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=10', { updateViaCache: 'none' }).catch(() => {});
   });
 }
 
