@@ -7,6 +7,7 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;'
 
 let categories = [];
 let hints = {};
+let pkDirty = false;
 let REVIEW_CAT = 'Needs Review';
 let txOffset = 0, txDone = false;
 let allocEnvelopes = [], closeGridLoaded = false;
@@ -183,6 +184,25 @@ function cancelDriveSync() {
   }
 }
 
+// A failed upload is retried a few times with a growing delay (and immediately
+// when the browser comes back online), so an offline edit still reaches Drive.
+let driveRetryTimer = null;
+let driveRetryCount = 0;
+function scheduleDriveRetry() {
+  if (driveRetryCount >= 5) return;
+  driveRetryCount += 1;
+  clearTimeout(driveRetryTimer);
+  driveRetryTimer = setTimeout(() => {
+    driveRetryTimer = null;
+    if (!appReady || !Drive.hasRefresh()) return;
+    scheduleDriveSync();
+  }, 30000 * driveRetryCount);
+}
+function clearDriveRetry() {
+  driveRetryCount = 0;
+  if (driveRetryTimer) { clearTimeout(driveRetryTimer); driveRetryTimer = null; }
+}
+
 // Debounced push: after any local change, upload the current budget to Drive.
 function scheduleDriveSync() {
   if (suppressDriveSync || !appReady || !Backend.loaded) return;
@@ -205,13 +225,15 @@ async function runDriveSync() {
     const m = await Drive.push(Backend.exportBinary());
     lastKnownRemoteMod = Number(m.modifiedTime) || lastKnownRemoteMod;
     localDirty = false;
+    clearDriveRetry();
     updateSyncStatus();
   } catch (e) {
     if (e.code === 'NOT_SIGNED_IN') {
       updateSyncStatus('Sign-in expired — tap Sign in (Settings)', 'danger');
       return;
     }
-    updateSyncStatus('Sync error — ' + e.message, 'danger');
+    updateSyncStatus('Sync error — ' + e.message + ' (retrying)', 'danger');
+    scheduleDriveRetry();
   } finally {
     driveSyncBusy = false;
     if (driveSyncQueued) {
@@ -276,8 +298,11 @@ async function pollRemote() {
       }
     }
     updateSyncStatus(); // clears "sign-in expired" once a silent renewal lands
+    clearDriveRetry();
   } catch (e) {
     if (e.code === 'NOT_SIGNED_IN') updateSyncStatus('Sign-in expired — tap Sign in (Settings)', 'danger');
+    else if (e.status) updateSyncStatus('Drive error — ' + e.message, 'danger');
+    else updateSyncStatus('Offline — retrying…', 'warning');
   }
 }
 
@@ -356,6 +381,8 @@ async function loadSummary() {
     return `<tr class="${cls}"><td>${esc(e.name)}</td><td class="text-end">${bal}</td></tr>`;
   }).join('');
   allocEnvelopes = s.envelopes.filter(e => e.available !== null);
+  const catHint = $('cat-hint');
+  if (catHint) catHint.classList.toggle('d-none', allocEnvelopes.length > 0);
   if (!closeGridLoaded) {
     const avail = {};
     allocEnvelopes.forEach(e => avail[e.name] = e.available);
@@ -480,6 +507,10 @@ async function loadTransactions(reset) {
   const rows = await api('/api/transactions?' + p.toString());
   txOffset += rows.length;
   if (rows.length < 100) txDone = true;
+  if (!rows.length) {
+    if (reset) $('tx-body').innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3">Nothing here yet. Add one with the form above, or change the filter.</td></tr>';
+    return;
+  }
 
   const inPage = new Set(rows.map(r => r.id));
   const childIds = new Set(rows.filter(r => r.parent_id && inPage.has(r.parent_id)).map(r => r.id));
@@ -503,7 +534,7 @@ async function loadTransactions(reset) {
     const canSplit = t.type !== 'allocation' && (parent ? t.type === 'expense' : true);
     const split = canSplit ? `<button class="btn btn-outline-secondary btn-sm tx-split" data-id="${t.id}" data-desc="${esc(t.description)}" data-amt="${Math.abs(t.amount)}">Split</button>` : '';
     const edit = `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${parent ? '' : esc(t.category)}" data-t="${t.type}" data-head="${parent ? 1 : 0}" title="Edit">✎</button>`;
-    return `<tr><td>${t.date}</td><td>${esc(t.description)}</td>${catCell}<td class="text-end ${sign}">${parent ? '<strong>' + fmt(t.amount) + '</strong>' : fmt(t.amount)}</td><td class="text-end">${edit}${split}<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}">×</button></td></tr>`;
+    return `<tr><td>${t.date}</td><td>${esc(t.description)}</td>${catCell}<td class="text-end ${sign}">${parent ? '<strong>' + fmt(t.amount) + '</strong>' : fmt(t.amount)}</td><td class="text-end">${edit}${split}<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" title="Delete" aria-label="Delete">×</button></td></tr>`;
   };
   const childHtml = k => {
     const sign = k.amount < 0 ? 'neg' : 'pos';
@@ -513,7 +544,7 @@ async function loadTransactions(reset) {
   const orphanHtml = t => {
     const sign = t.amount < 0 ? 'neg' : 'pos';
     const editAmt = t.type === 'expense' ? Math.abs(t.amount) : t.amount;
-    return `<tr class="tx-child"><td>${t.date}</td><td class="ps-4">↳ <span class="text-muted">part of a split not on this page</span></td><td><select class="form-select form-select-sm tx-cat" data-id="${t.id}">${catOpts(t.category)}</select></td><td class="text-end ${sign}">${fmt(t.amount)}</td><td class="text-end"><button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${esc(t.category)}" data-t="${t.type}" data-head="0" title="Edit">✎</button><button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}">×</button></td></tr>`;
+    return `<tr class="tx-child"><td>${t.date}</td><td class="ps-4">↳ <span class="text-muted">part of a split not on this page</span></td><td><select class="form-select form-select-sm tx-cat" data-id="${t.id}">${catOpts(t.category)}</select></td><td class="text-end ${sign}">${fmt(t.amount)}</td><td class="text-end"><button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${esc(t.category)}" data-t="${t.type}" data-head="0" title="Edit">✎</button><button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" title="Delete" aria-label="Delete">×</button></td></tr>`;
   };
 
   let html = '';
@@ -640,6 +671,7 @@ async function openEdit(id, d) {
   $('edit-amount').value = d.a;
   $('edit-desc').value = d.n;
   const isParent = editTarget.head;
+  $('edit-amount').readOnly = isParent; // a split total comes from its parts
   $('edit-cat-wrap').classList.toggle('d-none', isParent);
   if (!isParent) {
     $('edit-cat').innerHTML = categories.map(c => `<option value="${esc(c)}" ${c === d.c ? 'selected' : ''}>${esc(c)}</option>`).join('');
@@ -852,6 +884,7 @@ async function pkDelete(card) {
   btn.disabled = true;
   try {
     await api('/api/paychecks/' + id, { method: 'DELETE' });
+    pkDirty = false;
     await loadCategories(true);
     await refreshApp();
   } catch (e) {
@@ -885,6 +918,7 @@ async function pkSave(card) {
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
     await japi('/api/paychecks/' + card.dataset.id, 'PATCH', data);
+    pkDirty = false;
     pkStatus(st, 'text-success', 'Saved.');
     await loadCategories(true);
     await refreshApp();
@@ -917,13 +951,14 @@ async function pkCreate(card) {
     }
     const diff = Math.abs(totC - balC) / 100;
     const over = totC > balC;
-    pkStatus(st, 'text-danger', `The split is ${fmt(diff)} ${over ? 'short' : 'over'} — ${fmt(totC / 100)} assigned of ${fmt(data.balance)}. The split must equal the amount.`);
+    pkStatus(st, 'text-danger', `The split is ${fmt(diff)} ${over ? 'over' : 'short'} — ${fmt(totC / 100)} assigned of ${fmt(data.balance)}. The split must equal the amount.`);
     pkUpdateSum(card);
     return;
   }
   btn.disabled = true; btn.textContent = 'Creating…';
   try {
     await japi('/api/paychecks', 'POST', data);
+    pkDirty = false;
     pkStatus(st, 'text-success', 'Created.');
     await loadCategories(true);
     await refreshApp();
@@ -936,7 +971,11 @@ async function pkCreate(card) {
   }
 }
 
-async function loadPaychecks() {
+async function loadPaychecks(force) {
+  // Keep half-typed cards alive: a tab switch or an unrelated sync used to
+  // re-render the list and silently throw unsaved edits away.
+  if (pkDirty && !force) return;
+  pkDirty = false;
   const pks = await api('/api/paychecks');
   const income = pks.filter(p => !p.is_budget);
   const totals = {};
@@ -1116,6 +1155,7 @@ function addPaycheck() {
   const budget = $('pk-budget');
   if (budget) budget.insertAdjacentHTML('afterend', html);
   else $('paycheck-cards').insertAdjacentHTML('beforeend', html);
+  pkDirty = true;
   const card = document.querySelector('#paycheck-cards .pk-card[data-id=""]');
   if (card) {
     pkSyncAllocHint(card);
@@ -1127,9 +1167,30 @@ function addPaycheck() {
 function envAdd() {
   const v = $('env-new').value.trim();
   if (!v) return;
+  if (envDraft.some(c => c.toLowerCase() === v.toLowerCase())) {
+    setSettingsStatus('That category is already there.', 'text-warning');
+    return;
+  }
   envDraft.push(v);
   $('env-new').value = '';
   renderEnvChips();
+  saveEnvelopes();
+}
+
+// Categories save as soon as they are added or removed: the first-run guide
+// says "type it and click Add", and a forgotten Save button used to drop them.
+async function saveEnvelopes() {
+  const reviewDraft = $('review-cat').value;
+  try {
+    setSettingsStatus('Saving…');
+    await japi('/api/config', 'POST', { envelopes: envDraft });
+    await loadCategories(true);
+    await refreshApp();
+    $('review-cat').value = reviewDraft; // loadSettings repopulates from storage
+    setSettingsStatus('Categories saved.', 'text-success');
+  } catch (e) {
+    setSettingsStatus(e.message, 'text-danger');
+  }
 }
 
 splitModal = new bootstrap.Modal($('split-modal'));
@@ -1190,8 +1251,11 @@ $('data-reload').addEventListener('click', reloadSaved);
 $('data-download').addEventListener('click', downloadBackend);
 $('data-drive').addEventListener('click', manualSync);
 $('period-btn').addEventListener('click', () => {
-  $('tab-allocate').classList.toggle('d-none');
-  if (!$('tab-allocate').classList.contains('d-none') && !closeGridLoaded) refreshCloseGrid().catch(e => alert(e.message));
+  const panel = $('tab-allocate');
+  panel.classList.toggle('d-none');
+  // Always rebuild from the live balances: a preview built at startup goes
+  // stale as soon as anything is entered, and the carry-forward would be wrong.
+  if (!panel.classList.contains('d-none')) refreshCloseGrid().catch(e => alert(e.message));
 });
 
 $('close-load').addEventListener('click', async () => {
@@ -1206,10 +1270,9 @@ $('close-form').addEventListener('submit', async e => {
   e.preventDefault();
   const amounts = {};
   document.querySelectorAll('#close-grid .close-amt').forEach(i => {
-    const v = Math.round((parseFloat(i.value) || 0) * 100) / 100;
-    if (v > 0) amounts[i.dataset.cat] = v;
+    amounts[i.dataset.cat] = Math.round((parseFloat(i.value) || 0) * 100) / 100;
   });
-  if (!Object.keys(amounts).length) { setCloseStatus('Nothing to carry forward.', 'text-warning'); return; }
+  if (!Object.keys(amounts).length) { setCloseStatus('Add categories in Settings first.', 'text-warning'); return; }
   if (!confirm('Close the period? This clears previous transaction detail and keeps only the carryover balances above.')) return;
   cancelDriveSync();
   suppressDriveSync = true;
@@ -1304,6 +1367,7 @@ $('add-form').addEventListener('submit', async e => {
     if (wasIncome) { buildIncomeGrid(null); updateIncTotal(); }
     status.textContent = 'Added.';
     status.className = 'small text-success';
+    $('add-desc').focus();
     await loadCategories(true);
     await refreshApp();
   } catch (err) {
@@ -1347,23 +1411,25 @@ $('paycheck-cards').addEventListener('input', e => {
   const inp = e.target.closest('.pk-balance, .pk-cat-amt, .pk-cat-name');
   if (!inp) return;
   const card = inp.closest('.pk-card');
-  if (card) pkUpdateSum(card);
+  if (card) { pkDirty = true; pkUpdateSum(card); }
 });
 $('paycheck-cards').addEventListener('click', async e => {
   const card = e.target.closest('.pk-card');
   if (!card) return;
   if (e.target.closest('.pk-add-btn')) {
+    pkDirty = true;
     pkAddRow(card, card.querySelector('.pk-add-name').value);
     card.querySelector('.pk-add-name').value = '';
     return;
   }
   if (e.target.closest('.pk-rm-line')) {
+    pkDirty = true;
     e.target.closest('.pk-row').remove();
     pkSyncAllocHint(card);
     pkUpdateSum(card);
     return;
   }
-  if (e.target.closest('.pk-scale')) { pkScale(card); return; }
+  if (e.target.closest('.pk-scale')) { pkDirty = true; pkScale(card); return; }
   if (e.target.closest('.pk-del')) { pkDelete(card); return; }
   if (e.target.closest('.pk-save')) { pkSave(card); return; }
   if (e.target.closest('.pk-create')) { pkCreate(card); return; }
@@ -1374,6 +1440,7 @@ $('paycheck-cards').addEventListener('keydown', e => {
   if (!card) return;
   if (e.target.classList.contains('pk-add-name')) {
     e.preventDefault();
+    pkDirty = true;
     pkAddRow(card, e.target.value);
     e.target.value = '';
   }
@@ -1382,12 +1449,13 @@ $('paycheck-cards').addEventListener('keydown', e => {
 $('report-month').addEventListener('change', () => { if ($('report-month').value) loadReport().catch(err => alert(err.message)); });
 
 $('env-add').addEventListener('click', envAdd);
+$('cat-hint-settings').addEventListener('click', () => showTab('settings'));
 $('env-new').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); envAdd(); }
 });
 $('env-chips').addEventListener('click', e => {
   const rm = e.target.closest('.env-rm');
-  if (rm) { envDraft.splice(parseInt(rm.dataset.i, 10), 1); renderEnvChips(); }
+  if (rm) { envDraft.splice(parseInt(rm.dataset.i, 10), 1); renderEnvChips(); saveEnvelopes(); }
 });
 $('settings-save').addEventListener('click', async () => {
   try {
@@ -1430,10 +1498,15 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && appReady) saveNow().catch(e => console.error(e));
   if (document.visibilityState === 'visible' && appReady) pollRemote();
 });
+window.addEventListener('online', () => {
+  if (!appReady || !Drive.hasRefresh()) return;
+  clearDriveRetry();
+  scheduleDriveSync();
+});
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js?v=11', { updateViaCache: 'none' }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=12', { updateViaCache: 'none' }).catch(() => {});
   });
 }
 

@@ -645,6 +645,13 @@ const Backend = {
                 .filter(e => { if (!e) return false; const k = e.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
         }
         if (!next.review_category) next.review_category = DEFAULT_REVIEW;
+        // Renaming the review category carries its waiting items across; the
+        // Settings card promises this, and without it the items would be
+        // stranded in a category the Review tab no longer looks at.
+        if (next.review_category !== cur.review_category) {
+            this.run('UPDATE transactions SET category=? WHERE category=?', [next.review_category, cur.review_category]);
+            this.run('UPDATE paycheck_allocations SET category=? WHERE category=?', [next.review_category, cur.review_category]);
+        }
         this.saveCfg(next);
         this._dirty();
         return next;
