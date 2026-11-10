@@ -4,13 +4,13 @@ Zero-based envelope budgeting PWA. **No backend**: Google Drive holds the durabl
 
 ## Stack
 
-Plain JS, no bundler. `index.html` loads bootstrap@5.3.0 + sql.js@1.10.3 from the jsDelivr CDN, then `backend.js` → `drive.js` → `app.js` (all with `?v=12` cache-busting). `drive.js` lazily loads `https://accounts.google.com/gsi/client` itself, so there is no extra script tag to manage.
+Plain JS, no bundler. `index.html` loads bootstrap@5.3.0 + sql.js@1.10.3 from the jsDelivr CDN, then `backend.js` → `drive.js` → `app.js` (all with `?v=13` cache-busting). `drive.js` lazily loads `https://accounts.google.com/gsi/client` itself, so there is no extra script tag to manage.
 
 - `index.html` — UI (Bootstrap 5)
 - `app.js` — frontend behavior + two-way Drive sync orchestration
 - `backend.js` — SQL.js (WASM SQLite) data layer; `budget.db` is a plain SQLite file
 - `drive.js` — Google sign-in (Google Identity Services token model) and Drive sync
-- `manifest.json` / `sw.js` — PWA; service-worker cache is named `roux-budget-web-v12`
+- `manifest.json` / `sw.js` — PWA; service-worker cache is named `roux-budget-web-v13`
 - `icons/` — PWA icons
 - `reference/` — **gitignored**, local-only copy of the old Flask/Docker version, kept for reference; never deployed
 
@@ -29,9 +29,13 @@ Personal financial data (`budget.db`) is intentionally **not** in this repositor
 ## Data + sync model
 
 - Drive's `budget.db` is the single durable copy; IndexedDB is only a local cache so the app opens before Drive is reachable.
-- Save → push (media `PATCH` onto the fixed Drive file); load → pull; while open, the app polls Drive every few seconds so other signed-in devices pick up changes in seconds.
+- Save → push (media `PATCH` onto the fixed Drive file); load → pull; while open, the app polls Drive every 10 s so other signed-in devices pick up changes.
+- Before each push the app compares Drive's `modifiedTime` with the last one it synced. If another device wrote in between, it stops and shows the conflict banner (use theirs / keep mine) instead of overwriting.
+- Failed pushes retry with backoff (5 attempts) and immediately on the `online` event.
+- Once a day the app uploads `budget-backup-YYYY-MM-DD.db` to Drive and keeps the last 7 (`maybeDailyBackup`). Period-close backups (`budget-backup-<timestamp>.db`) are left alone by that pruning.
+- Every delete offers Undo for 12 s, implemented by restoring a DB snapshot taken right before the mutation.
 - First sign-in: an existing local budget is uploaded once (never silently overwritten).
-- New-period workflow: saves, uploads a period backup to Drive, then carries envelope balances forward.
+- New-period workflow: saves, downloads a local `.db` copy, uploads a period backup to Drive, then carries envelope balances forward (negatives included).
 
 ## Run locally
 

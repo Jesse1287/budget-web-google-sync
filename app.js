@@ -22,6 +22,10 @@ let driveSyncQueued = false;
 let suppressDriveSync = false;
 let localDirty = false;
 let lastKnownRemoteMod = 0;
+let conflictPending = null;   // remote copy moved under unsynced local edits
+let undoState = null;         // DB snapshot offered as "Undo" after a delete
+let undoTimer = null;
+let dailyBackupTried = '';
 let idbPromise = null;
 let splitModal, editModal;
 let splitTargetId = null;
@@ -141,6 +145,11 @@ function updateSyncStatus(msg, preset) {
     el.className = 'badge ms-2 ' + cls;
     return;
   }
+  if (conflictPending) {
+    el.textContent = 'Conflict — choose which copy to keep';
+    el.className = 'badge ms-2 bg-warning text-dark';
+    return;
+  }
   if (!Drive.hasRefresh()) {
     el.textContent = 'Not signed in';
     el.className = 'badge ms-2 bg-danger';
@@ -215,6 +224,7 @@ async function runDriveSync() {
   driveSyncTimer = null;
   if (suppressDriveSync || !appReady || !Backend.loaded) return;
   if (!Drive.hasRefresh()) return;
+  if (conflictPending) return; // paused until the user picks a copy
   if (driveSyncBusy) {
     driveSyncQueued = true;
     return;
@@ -222,11 +232,17 @@ async function runDriveSync() {
   driveSyncBusy = true;
   try {
     await saveNow();
-    const m = await Drive.push(Backend.exportBinary());
-    lastKnownRemoteMod = Number(m.modifiedTime) || lastKnownRemoteMod;
-    localDirty = false;
-    clearDriveRetry();
-    updateSyncStatus();
+    // Another device may have written while this one was editing: never
+    // overwrite it silently, ask which copy to keep.
+    let meta = null;
+    try { meta = await Drive.fileMeta(false); } catch (e) { if (e.code === 'NOT_SIGNED_IN') throw e; }
+    if (meta && remoteIsNewer(meta.modifiedTime)) {
+      conflictPending = { remoteModified: Number(meta.modifiedTime) || 0 };
+      $('conflict-banner').classList.remove('d-none');
+      updateSyncStatus('Conflict — choose which copy to keep', 'warning');
+      return;
+    }
+    await pushNow();
   } catch (e) {
     if (e.code === 'NOT_SIGNED_IN') {
       updateSyncStatus('Sign-in expired — tap Sign in (Settings)', 'danger');
@@ -241,6 +257,96 @@ async function runDriveSync() {
       scheduleDriveSync();
     }
   }
+}
+
+async function pushNow() {
+  const m = await Drive.push(Backend.exportBinary());
+  lastKnownRemoteMod = Number(m.modifiedTime) || lastKnownRemoteMod;
+  localDirty = false;
+  clearDriveRetry();
+  updateSyncStatus();
+  maybeDailyBackup();
+}
+
+function remoteIsNewer(modifiedTime) {
+  const m = Number(modifiedTime) || 0;
+  return Boolean(m) && lastKnownRemoteMod > 0 && m > lastKnownRemoteMod + 1500;
+}
+
+async function resolveConflictKeepMine() {
+  conflictPending = null;
+  $('conflict-banner').classList.add('d-none');
+  driveSyncBusy = true;
+  try {
+    await saveNow();
+    await pushNow();
+  }
+  catch (e) {
+    updateSyncStatus('Sync error — ' + e.message + ' (retrying)', 'danger');
+    scheduleDriveRetry();
+  } finally { driveSyncBusy = false; }
+}
+
+async function resolveConflictTakeTheirs() {
+  conflictPending = null;
+  $('conflict-banner').classList.add('d-none');
+  await pullRemote('Loading the other device\'s copy…');
+}
+
+// Daily rolling backup in Drive: one per day, last 7 kept. Best effort only —
+// a failed backup never blocks or nags.
+async function maybeDailyBackup() {
+  try {
+    if (!Drive.hasRefresh() || !Backend.loaded) return;
+    const today = localDate();
+    if (dailyBackupTried === today) return;
+    let saved = '';
+    try { saved = localStorage.getItem('budget.backup.day') || ''; } catch (e) {}
+    if (saved === today) return;
+    dailyBackupTried = today;
+    const recent = await api('/api/transactions?type=all&limit=1');
+    if (!recent.length) return; // nothing worth backing up yet
+    const files = await Drive.listBackups();
+    const name = 'budget-backup-' + today + '.db';
+    if (!files.some(f => f.name === name)) await Drive.uploadBackup(name, Backend.exportBinary());
+    const daily = files
+      .filter(f => /^budget-backup-\d{4}-\d{2}-\d{2}\.db$/.test(f.name || ''))
+      .concat(files.some(f => f.name === name) ? [] : [{ name: name, id: '' }])
+      .sort((a, b) => String(b.name).localeCompare(String(a.name)));
+    for (const f of daily.slice(7)) {
+      if (!f.id) continue;
+      try { await Drive.deleteFile(f.id); } catch (e) {}
+    }
+    try { localStorage.setItem('budget.backup.day', today); } catch (e) {}
+  } catch (e) {
+    // ignored on purpose
+  }
+}
+
+function offerUndo(message, bytes) {
+  undoState = bytes;
+  $('undo-msg').textContent = message;
+  $('undo-toast').classList.remove('d-none');
+  if (undoTimer) clearTimeout(undoTimer);
+  undoTimer = setTimeout(hideUndo, 12000);
+}
+
+function hideUndo() {
+  undoState = null;
+  if (undoTimer) { clearTimeout(undoTimer); undoTimer = null; }
+  $('undo-toast').classList.add('d-none');
+}
+
+async function undoLastDelete() {
+  if (!undoState) return;
+  const bytes = undoState;
+  hideUndo();
+  try {
+    await Backend.loadFromBinary(new Uint8Array(bytes));
+    await saveNow();
+    await enterApp();
+    scheduleDriveSync();
+  } catch (e) { alert(e.message); }
 }
 
 // Pull the latest copy from Drive into the running app.
@@ -273,7 +379,7 @@ async function pullRemote(msg) {
 function startSyncPolling() {
   stopSyncPolling();
   if (!Drive.hasRefresh()) return;
-  syncPollTimer = setInterval(pollRemote, 5000);
+  syncPollTimer = setInterval(pollRemote, 10000);
 }
 
 function stopSyncPolling() {
@@ -376,9 +482,11 @@ async function loadSummary() {
   $('balance').textContent = fmt(s.balance);
   $('review-count').textContent = s.needs_review.length;
   $('envelope-body').innerHTML = s.envelopes.map(e => {
-    const cls = e.available !== null && e.available < 0 ? 'over' : '';
-    const bal = e.available === null ? '—' : `<span class="${e.available < 0 ? 'neg' : ''}">${fmt(e.available)}</span>`;
-    return `<tr class="${cls}"><td>${esc(e.name)}</td><td class="text-end">${bal}</td></tr>`;
+    const over = e.available !== null && e.available < 0;
+    const cls = over ? 'over' : '';
+    const bal = e.available === null ? '—' : `<span class="${over ? 'neg' : ''}">${fmt(e.available)}</span>`;
+    const tag = over ? ' <span class="badge text-bg-danger">over</span>' : '';
+    return `<tr class="${cls}"><td>${esc(e.name)}${tag}</td><td class="text-end">${bal}</td></tr>`;
   }).join('');
   allocEnvelopes = s.envelopes.filter(e => e.available !== null);
   const catHint = $('cat-hint');
@@ -569,7 +677,9 @@ function wireTxBody() {
     try {
       if (btn.classList.contains('tx-del')) {
         if (!confirm('Delete this transaction?')) return;
+        const snapshot = Backend.exportBinary();
         await japi('/api/transactions/' + btn.dataset.id, 'DELETE');
+        offerUndo('Transaction deleted.', snapshot);
         await refreshApp();
       }
       if (btn.classList.contains('tx-hint')) {
@@ -883,8 +993,10 @@ async function pkDelete(card) {
   const btn = card.querySelector('.pk-del');
   btn.disabled = true;
   try {
+    const snapshot = Backend.exportBinary();
     await api('/api/paychecks/' + id, { method: 'DELETE' });
     pkDirty = false;
+    offerUndo('Check template deleted.', snapshot);
     await loadCategories(true);
     await refreshApp();
   } catch (e) {
@@ -1064,6 +1176,7 @@ async function enterApp() {
   showApp();
   await refreshApp();
   startSyncPolling();
+  maybeDailyBackup();
 }
 
 async function createBudget() {
@@ -1276,6 +1389,9 @@ $('close-form').addEventListener('submit', async e => {
   if (!confirm('Close the period? This clears previous transaction detail and keeps only the carryover balances above.')) return;
   cancelDriveSync();
   suppressDriveSync = true;
+  // Keep a copy on this device before the old detail is wiped; doing it now
+  // keeps the click's user gesture so the browser allows the download.
+  try { downloadBlob(Backend.exportBinary(), 'budget-before-new-period-' + localDate() + '.db'); } catch (e) {}
   try {
     setCloseStatus('Saving local backup…', 'text-muted');
     await saveNow();
@@ -1491,6 +1607,12 @@ $('data-reload2').addEventListener('click', reloadSaved);
 $('data-download2').addEventListener('click', downloadBackend);
 $('data-new').addEventListener('click', newBudget);
 
+$('conflict-keep-mine').addEventListener('click', resolveConflictKeepMine);
+$('conflict-take-theirs').addEventListener('click', resolveConflictTakeTheirs);
+$('undo-btn').addEventListener('click', undoLastDelete);
+$('undo-close').addEventListener('click', hideUndo);
+$('update-reload').addEventListener('click', () => location.reload());
+
 window.addEventListener('pagehide', () => {
   if (appReady) saveNow().catch(e => console.error(e));
 });
@@ -1501,12 +1623,28 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('online', () => {
   if (!appReady || !Drive.hasRefresh()) return;
   clearDriveRetry();
+  dailyBackupTried = ''; // a backup that failed offline may work now
   scheduleDriveSync();
+  maybeDailyBackup();
 });
 
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js?v=12', { updateViaCache: 'none' }).catch(() => {});
+  window.addEventListener('load', async () => {
+    try {
+      const reg = await navigator.serviceWorker.register('sw.js?v=13', { updateViaCache: 'none' });
+      const promptUpdate = () => {
+        if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
+      };
+      if (reg.waiting) promptUpdate();
+      reg.addEventListener('updatefound', () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener('statechange', () => { if (sw.state === 'installed') promptUpdate(); });
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') reg.update().catch(() => {});
+      });
+    } catch (e) { /* offline: try again next load */ }
   });
 }
 

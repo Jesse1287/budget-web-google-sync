@@ -83,6 +83,15 @@ body { background-color: #f8f9fa; }
     </div>
   </div>
 
+  <div id="conflict-banner" class="alert alert-warning mb-3 d-none">
+    <strong>Another device changed your budget.</strong>
+    <div class="small">The copy in Google Drive is newer than this device's, and you have changes here that are not uploaded yet. Pick which copy to keep.</div>
+    <div class="mt-2 d-flex gap-2 flex-wrap">
+      <button class="btn btn-sm btn-outline-dark" id="conflict-take-theirs">Use the other device's copy</button>
+      <button class="btn btn-sm btn-warning" id="conflict-keep-mine">Keep what I entered here</button>
+    </div>
+  </div>
+
   <div id="tab-allocate" class="mb-3 d-none">
     <div class="card">
       <div class="card-header bg-white"><h5 class="mb-0">New period — close &amp; start a new one</h5></div>
@@ -292,7 +301,7 @@ body { background-color: #f8f9fa; }
               <button id="data-download2" class="btn btn-outline-secondary btn-sm">Download .db</button>
               <button id="data-new" class="btn btn-outline-danger btn-sm">Start fresh</button>
             </div>
-            <p class="small text-muted mt-2 mb-0">App version 12</p>
+            <p class="small text-muted mt-2 mb-0">App version 13</p>
           </div>
         </div>
       </div>
@@ -381,7 +390,9 @@ body { background-color: #f8f9fa; }
           <li>Sign in with the same Google account on your phone and on your computer and you get the same budget. A change made on one shows up on the other in a few seconds while both are open.</li>
           <li>If the top of the screen says the sign-in expired, open <strong>Settings</strong> and click <strong>Sign in with Google</strong> once.</li>
           <li>The badge at the top tells you what is going on. <em>Synced 3:42:05 PM</em> means Google Drive has your latest copy. <em>Offline</em> or <em>Sync error</em> means the app keeps trying in the background; your changes are still safe in this browser.</li>
-          <li>Do not change the budget on two devices at the same moment. If you do, the last save wins and the other change is lost.</li>
+          <li>If two devices change the budget at the same time, the app stops and asks which copy to keep. Pick one; the other change is dropped. Try to use one device at a time.</li>
+          <li>Deleted something by mistake? An <strong>Undo</strong> button shows for a few seconds at the bottom of the screen.</li>
+          <li>The app also saves a copy of your budget in Google Drive once a day (the last 7 are kept), and gives you a file copy when you start a new period.</li>
           <li>To fix a mistake, use the buttons on the transaction row: change the category, split it, edit it, or delete it.</li>
           <li><strong>Settings → Data → Download .db</strong> saves a copy of your budget on your device. <strong>Start fresh</strong> makes a new empty budget for every device; it uploads a backup of the old one first.</li>
         </ul>
@@ -391,6 +402,17 @@ body { background-color: #f8f9fa; }
 </div>
 
 <datalist id="pk-envelopes"></datalist>
+
+<div id="undo-toast" class="d-none position-fixed bottom-0 start-50 translate-middle-x mb-3 p-2 bg-dark text-white rounded shadow d-flex align-items-center gap-3" style="z-index:1080">
+  <span id="undo-msg" class="small"></span>
+  <button class="btn btn-sm btn-light" id="undo-btn">Undo</button>
+  <button class="btn btn-sm btn-link text-white text-decoration-none" id="undo-close" aria-label="Dismiss">×</button>
+</div>
+
+<div id="update-banner" class="d-none position-fixed bottom-0 end-0 m-3 p-2 bg-primary text-white rounded shadow" style="z-index:1080">
+  <span class="small">A new version of the app is ready.</span>
+  <button class="btn btn-sm btn-light ms-2" id="update-reload">Reload</button>
+</div>
 
 <div class="modal fade" id="split-modal" tabindex="-1">
   <div class="modal-dialog">
@@ -440,8 +462,8 @@ body { background-color: #f8f9fa; }
 <script>window.SQLJS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-<script src="backend.js?v=12"></script>
-<script src="drive.js?v=12"></script>
-<script src="app.js?v=12"></script>
+<script src="backend.js?v=13"></script>
+<script src="drive.js?v=13"></script>
+<script src="app.js?v=13"></script>
 </body>
 </html>

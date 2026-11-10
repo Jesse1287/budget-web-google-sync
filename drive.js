@@ -363,6 +363,24 @@
     return await uploadBytes(bytes, name);
   }
 
+  // Rolling backups: list the app's budget-backup-*.db files (newest first)
+  // and delete old ones. drive.file scope reaches files the app created.
+  async function listBackups() {
+    const q = new URLSearchParams({
+      q: "name contains 'budget-backup-' and trashed=false",
+      fields: 'files(id,name,modifiedTime)',
+      orderBy: 'modifiedTime desc',
+      pageSize: '50'
+    }).toString();
+    const res = await request(API_FILES + '?' + q, undefined, false, false);
+    const data = await res.json().catch(() => ({}));
+    return data.files || [];
+  }
+
+  async function deleteFile(id) {
+    return await request(API_FILES + '/' + id, { method: 'DELETE' }, false, false);
+  }
+
   function lastRemoteModified() { return Number(lsGet(K.remoteMod) || 0); }
   function lastPushAt() { return Number(lsGet(K.lastPush) || 0); }
   function lastPullAt() { return Number(lsGet(K.lastPull) || 0); }
@@ -430,6 +448,8 @@
     push: push,
     pull: pull,
     uploadBackup: uploadBackup,
+    listBackups: listBackups,
+    deleteFile: deleteFile,
     lastRemoteModified: lastRemoteModified,
     lastPushAt: lastPushAt,
     lastPullAt: lastPullAt,
