@@ -945,7 +945,7 @@ async function loadPaychecks() {
   }
   let html = `<div class="col-12" id="pk-budget">${pkBudgetCardHTML(totals)}</div>`;
   if (!income.length) {
-    html += `<div class="col-12"><div class="card"><div class="card-body text-center small text-muted py-4">No checks saved yet. Add income with the form at the top (Type = Income) and it will be remembered here — or click "+ New check" to create a reusable template.</div></div></div>`;
+    html += `<div class="col-12"><div class="card"><div class="card-body text-center small text-muted py-4">No checks saved yet. Click "+ New check" to make a reusable template, or open the Help tab for the setup steps.</div></div></div>`;
   } else {
     html += income.map(pk => pkCardHTML(pk, false)).join('');
   }
@@ -1035,6 +1035,7 @@ async function createBudget() {
     await saveNow();
     await enterApp();
     await runDriveSync();
+    showTab('help'); // brand-new budget: start them on the setup steps
   } catch (e) { landStatus(e.message, 'text-danger'); }
 }
 
@@ -1143,7 +1144,7 @@ document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
     e.preventDefault();
     document.querySelectorAll('.nav-tabs .nav-link').forEach(x => x.classList.remove('active'));
     a.classList.add('active');
-    ['categories', 'transactions', 'review', 'paychecks', 'report', 'settings'].forEach(t => {
+    ['categories', 'transactions', 'review', 'paychecks', 'report', 'settings', 'help'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('d-none', t !== a.dataset.tab);
     });
@@ -1157,6 +1158,12 @@ document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
     } catch (err) { alert(err.message); }
   });
 });
+
+// Switch tabs from code (used to drop a fresh budget on the setup guide).
+function showTab(name) {
+  const link = document.querySelector('.nav-tabs .nav-link[data-tab="' + name + '"]');
+  if (link) link.click();
+}
 
 $('land-signin').addEventListener('click', async () => {
   const btn = $('land-signin');
@@ -1426,7 +1433,7 @@ document.addEventListener('visibilitychange', () => {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js?v=10', { updateViaCache: 'none' }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=11', { updateViaCache: 'none' }).catch(() => {});
   });
 }
 

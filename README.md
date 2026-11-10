@@ -9,6 +9,7 @@ Zero-based envelope budgeting PWA.
 - Browser storage (IndexedDB) is a fast local cache so the app still opens before Drive is reachable; it never holds the only copy.
 - One-time migration: an existing local budget is uploaded to Drive on first sign-in (it is never silently overwritten).
 - Import/export of `budget.db` files.
+- Built-in **Help** tab: a plain-language setup guide (categories → checks → today's balance) plus everyday use, periods, and sync.
 - Recurring paycheck and income templates.
 - New period workflow that saves, uploads a period backup to Drive, then carries forward envelope balances.
 
