@@ -15,9 +15,12 @@ let dataName = 'budget.db';
 let appReady = false;
 let saveTimer = null;
 let driveSyncTimer = null;
+let syncPollTimer = null;
 let driveSyncBusy = false;
 let driveSyncQueued = false;
 let suppressDriveSync = false;
+let localDirty = false;
+let lastKnownRemoteMod = 0;
 let idbPromise = null;
 let splitModal, editModal;
 let splitTargetId = null;
@@ -55,6 +58,7 @@ async function idbSet(key, value) {
 
 function scheduleSave() {
   if (!appReady || !Backend.loaded) return;
+  localDirty = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     try {
@@ -99,7 +103,25 @@ function showApp() {
 function landStatus(msg, cls) {
   const el = $('land-status');
   el.textContent = msg || '';
-  el.className = 'small mt-3 ' + (cls || 'text-muted');
+  el.className = 'small mt-3 text-center ' + (cls || 'text-muted');
+}
+
+// Sign-in guard: shown until the user has a valid Google sign-in.
+function showSignInScreen(msg, cls) {
+  showLanding();
+  $('land-desc').textContent = 'Sign in with Google to open your budget. It lives in Google Drive and syncs automatically on every device you sign in on.';
+  $('land-signin').classList.remove('d-none');
+  $('land-choices').classList.add('d-none');
+  landStatus(msg, cls);
+}
+
+// Signed in, but this account has no budget in Drive yet: pick a start.
+function showChoiceScreen(msg, cls) {
+  showLanding();
+  $('land-desc').textContent = 'No budget found in Google Drive for this account yet.';
+  $('land-signin').classList.add('d-none');
+  $('land-choices').classList.remove('d-none');
+  landStatus(msg, cls);
 }
 
 function setSettingsStatus(msg, cls) {
@@ -108,27 +130,48 @@ function setSettingsStatus(msg, cls) {
   el.className = 'small ' + (cls || 'text-muted');
 }
 
-function updateDriveStatus(msg, cls) {
-  const el = $('drive-status');
+// Top-bar sync pill. preset: success | info | warning | danger, or omitted for auto.
+function updateSyncStatus(msg, preset) {
+  const el = $('sync-pill');
+  if (!el) return;
+  const cls = { success: 'bg-success', info: 'bg-info text-dark', warning: 'bg-warning text-dark', danger: 'bg-danger' }[preset] || 'bg-secondary';
   if (msg) {
     el.textContent = msg;
-    el.className = 'small ' + (cls || 'text-muted');
+    el.className = 'badge ms-2 ' + cls;
+    return;
+  }
+  if (!Drive.hasRefresh()) {
+    el.textContent = 'Not signed in';
+    el.className = 'badge ms-2 bg-danger';
+    return;
+  }
+  if (driveSyncBusy) {
+    el.textContent = 'Syncing…';
+    el.className = 'badge ms-2 ' + (localDirty ? 'bg-info text-dark' : 'bg-secondary');
+    return;
+  }
+  if (localDirty) {
+    el.textContent = 'Changes pending — syncing…';
+    el.className = 'badge ms-2 bg-warning text-dark';
     return;
   }
   const s = Drive.status();
-  if (!s.hasClient) {
-    el.textContent = 'Drive: not connected';
-    el.className = 'small text-muted';
-  } else if (!Drive.hasToken()) {
-    el.textContent = 'Drive: client ID saved — press Connect to enable auto-sync';
-    el.className = 'small text-warning';
-  } else if (s.hasFile) {
-    el.textContent = 'Drive: ' + s.fileName + ' — auto-sync on';
-    el.className = 'small text-success';
+  if (s.lastPush) {
+    el.textContent = 'Synced ' + new Date(s.lastPush).toLocaleTimeString();
+    el.className = 'badge ms-2 bg-success';
   } else {
-    el.textContent = 'Drive: connected — next change will create budget.db';
-    el.className = 'small text-success';
+    el.textContent = 'Connected';
+    el.className = 'badge ms-2 bg-secondary';
   }
+}
+
+// Detailed status line in the Settings tab.
+function updateSyncDetail() {
+  const s = Drive.status();
+  const a = s.account;
+  $('sync-account').textContent = a && a.email ? (a.name ? a.name + ' · ' : '') + a.email : (Drive.hasRefresh() ? 'Signed in' : 'Not signed in');
+  const t = ts => ts ? new Date(ts).toLocaleString() : '—';
+  $('drive-status').textContent = 'Last upload: ' + t(s.lastPush) + '  ·  Last download: ' + t(s.lastPull) + '  ·  Google Drive copy modified: ' + t(s.remoteModified);
 }
 
 function cancelDriveSync() {
@@ -138,19 +181,18 @@ function cancelDriveSync() {
   }
 }
 
+// Debounced push: after any local change, upload the current budget to Drive.
 function scheduleDriveSync() {
   if (suppressDriveSync || !appReady || !Backend.loaded) return;
-  const s = Drive.status();
-  if (!s.hasClient || !Drive.hasToken()) return;
+  if (!Drive.hasRefresh()) return;
   cancelDriveSync();
-  driveSyncTimer = setTimeout(runDriveSync, 4000);
+  driveSyncTimer = setTimeout(runDriveSync, 2000);
 }
 
 async function runDriveSync() {
   driveSyncTimer = null;
   if (suppressDriveSync || !appReady || !Backend.loaded) return;
-  const s = Drive.status();
-  if (!s.hasClient || !Drive.hasToken()) return;
+  if (!Drive.hasRefresh()) return;
   if (driveSyncBusy) {
     driveSyncQueued = true;
     return;
@@ -158,16 +200,114 @@ async function runDriveSync() {
   driveSyncBusy = true;
   try {
     await saveNow();
-    await Drive.upload(Backend.exportBinary(), { interactive: false });
-    updateDriveStatus('Drive: synced ' + new Date().toLocaleTimeString(), 'text-success');
+    const m = await Drive.push(Backend.exportBinary());
+    lastKnownRemoteMod = Number(m.modifiedTime) || lastKnownRemoteMod;
+    localDirty = false;
+    updateSyncStatus();
   } catch (e) {
-    updateDriveStatus('Drive auto-sync: ' + e.message, 'text-danger');
+    if (e.code === 'NOT_SIGNED_IN') {
+      updateSyncStatus('Sign-in expired — fix in Settings', 'danger');
+      stopSyncPolling();
+      return;
+    }
+    updateSyncStatus('Sync error — ' + e.message, 'danger');
   } finally {
     driveSyncBusy = false;
     if (driveSyncQueued) {
       driveSyncQueued = false;
       scheduleDriveSync();
     }
+  }
+}
+
+// Pull the latest copy from Drive into the running app.
+async function pullRemote(msg) {
+  if (driveSyncBusy) return;
+  driveSyncBusy = true;
+  const prevSuppress = suppressDriveSync;
+  suppressDriveSync = true;
+  updateSyncStatus(msg || 'Pulling from Google Drive…', 'info');
+  try {
+    const r = await Drive.pull();
+    await Backend.loadFromBinary(new Uint8Array(r.bytes));
+    lastKnownRemoteMod = Number(r.modifiedTime) || 0;
+    localDirty = false;
+    await enterApp();
+    updateSyncStatus();
+  } catch (e) {
+    if (e.code === 'NOT_SIGNED_IN') {
+      updateSyncStatus('Sign-in expired — fix in Settings', 'danger');
+      stopSyncPolling();
+    } else {
+      updateSyncStatus('Pull failed — ' + e.message, 'danger');
+    }
+  } finally {
+    suppressDriveSync = prevSuppress;
+    driveSyncBusy = false;
+  }
+}
+
+// Poll Drive while the app is open so other devices' changes arrive in seconds.
+function startSyncPolling() {
+  stopSyncPolling();
+  if (!Drive.hasRefresh()) return;
+  syncPollTimer = setInterval(pollRemote, 5000);
+}
+
+function stopSyncPolling() {
+  if (syncPollTimer) {
+    clearInterval(syncPollTimer);
+    syncPollTimer = null;
+  }
+}
+
+async function pollRemote() {
+  if (!appReady || !Backend.loaded || !Drive.hasRefresh()) return;
+  if (suppressDriveSync || driveSyncBusy || localDirty) return;
+  if (document.hidden) return;
+  try {
+    const meta = await Drive.fileMeta(false);
+    if (meta && meta.modifiedTime) {
+      const mod = Number(meta.modifiedTime);
+      if (mod > lastKnownRemoteMod) {
+        await pullRemote('New changes on another device…');
+      } else if (!lastKnownRemoteMod) {
+        lastKnownRemoteMod = mod;
+      }
+    }
+  } catch (e) {
+    if (e.code === 'NOT_SIGNED_IN') {
+      updateSyncStatus('Sign-in expired — fix in Settings', 'danger');
+      stopSyncPolling();
+    }
+  }
+}
+
+// Manual "Sync" from the top bar: take the newest remote copy, or push ours.
+async function manualSync() {
+  if (!appReady || !Backend.loaded) return;
+  if (!Drive.hasRefresh()) {
+    updateSyncStatus('Sign in first', 'danger');
+    return;
+  }
+  if (driveSyncBusy) return;
+  try {
+    await saveNow();
+    localDirty = false;
+    const meta = await Drive.fileMeta(true);
+    if (meta && meta.modifiedTime && Number(meta.modifiedTime) > lastKnownRemoteMod) {
+      await pullRemote('Syncing…');
+    } else {
+      driveSyncBusy = true;
+      updateSyncStatus('Syncing…', 'info');
+      const m = await Drive.push(Backend.exportBinary());
+      lastKnownRemoteMod = Number(m.modifiedTime) || lastKnownRemoteMod;
+      updateSyncStatus();
+    }
+  } catch (e) {
+    updateSyncStatus('Sync error — ' + e.message, 'danger');
+  } finally {
+    driveSyncBusy = false;
   }
 }
 
@@ -846,9 +986,8 @@ async function loadSettings() {
   const cfg = await api('/api/config');
   envDraft = [...(cfg.envelopes || [])];
   $('review-cat').value = cfg.review_category || 'Needs Review';
-  $('drive-client').value = Drive.getClientId() || '';
   renderEnvChips();
-  updateDriveStatus();
+  updateSyncDetail();
 }
 
 async function saveConfigPatch(patch) {
@@ -873,7 +1012,7 @@ async function refreshApp() {
   if (!$('tab-paychecks').classList.contains('d-none')) await loadPaychecks();
   if (!$('tab-report').classList.contains('d-none') && $('report-month').value) await loadReport();
   if (!$('tab-settings').classList.contains('d-none')) await loadSettings();
-  await updateDriveStatus();
+  updateSyncStatus();
   await updateDataBar();
 }
 
@@ -887,6 +1026,7 @@ async function enterApp() {
   await updateDataBar();
   showApp();
   await refreshApp();
+  startSyncPolling();
 }
 
 async function createBudget() {
@@ -896,52 +1036,38 @@ async function createBudget() {
     dataName = 'budget.db';
     await saveNow();
     await enterApp();
+    await runDriveSync();
   } catch (e) { landStatus(e.message, 'text-danger'); }
 }
 
 async function openFile(file) {
   cancelDriveSync();
-  suppressDriveSync = true;
   try {
-    landStatus('Opening…');
+    landStatus('Importing…');
     await Backend.loadFromBinary(new Uint8Array(await file.arrayBuffer()));
-    dataName = file.name || 'budget.db';
-    await saveNow();
-    await enterApp();
-  } catch (e) { landStatus(e.message, 'text-danger'); }
-  finally { suppressDriveSync = false; }
-}
-
-async function openDrive() {
-  if (!Drive.status().hasClient) {
-    landStatus('No Google OAuth client ID saved. Open or create a budget first, then save the client ID in Settings, then retry.', 'text-warning');
-    return;
-  }
-  cancelDriveSync();
-  suppressDriveSync = true;
-  try {
-    landStatus('Contacting Google Drive…');
-    const bytes = await Drive.openLatest();
-    await Backend.loadFromBinary(new Uint8Array(bytes));
     dataName = 'budget.db';
     await saveNow();
     await enterApp();
+    landStatus('Imported — uploading to Google Drive…');
+    await runDriveSync();
   } catch (e) { landStatus(e.message, 'text-danger'); }
-  finally { suppressDriveSync = false; }
 }
 
 async function newBudget() {
-  if (!confirm('Replace the current budget with a fresh empty one? The current data will be lost unless saved or downloaded.')) return;
+  if (!confirm('Replace your budget on ALL devices with a fresh empty one? A point-in-time copy is kept in Google Drive first.')) return;
   cancelDriveSync();
-  suppressDriveSync = true;
   try {
     await saveNow();
+    if (Drive.hasRefresh()) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      await Drive.uploadBackup('budget-backup-' + stamp + '.db', Backend.exportBinary());
+    }
     await Backend.createFresh();
     dataName = 'budget.db';
     await saveNow();
     await enterApp();
+    await runDriveSync();
   } catch (e) { alert(e.message); }
-  finally { suppressDriveSync = false; }
 }
 
 async function downloadBackend() {
@@ -1034,18 +1160,18 @@ document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
   });
 });
 
+$('land-signin').addEventListener('click', () => Drive.signIn());
 $('land-create').addEventListener('click', createBudget);
 $('land-open-file').addEventListener('click', () => $('file-input').click());
 $('file-input').addEventListener('change', e => {
   if (e.target.files[0]) openFile(e.target.files[0]);
   e.target.value = '';
 });
-$('land-open-drive').addEventListener('click', openDrive);
 
 $('data-save').addEventListener('click', () => saveNow().catch(e => alert(e.message)));
 $('data-reload').addEventListener('click', reloadSaved);
 $('data-download').addEventListener('click', downloadBackend);
-$('data-drive').addEventListener('click', () => document.querySelector('[data-tab="settings"]').click());
+$('data-drive').addEventListener('click', manualSync);
 $('period-btn').addEventListener('click', () => {
   $('tab-allocate').classList.toggle('d-none');
   if (!$('tab-allocate').classList.contains('d-none') && !closeGridLoaded) refreshCloseGrid().catch(e => alert(e.message));
@@ -1073,11 +1199,11 @@ $('close-form').addEventListener('submit', async e => {
   try {
     setCloseStatus('Saving local backup…', 'text-muted');
     await saveNow();
-    if (Drive.status().hasClient) {
+    if (Drive.hasRefresh()) {
       setCloseStatus('Uploading period backup to Google Drive…', 'text-muted');
       try {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        await Drive.backup('budget-backup-' + stamp + '.db', Backend.exportBinary());
+        await Drive.uploadBackup('budget-backup-' + stamp + '.db', Backend.exportBinary());
       } catch (err) {
         if (!confirm('Google Drive backup failed: ' + err.message + '\n\nClose the period anyway without a Drive backup?')) { suppressDriveSync = false; return; }
       }
@@ -1254,43 +1380,16 @@ $('settings-save').addEventListener('click', async () => {
   } catch (e) { setSettingsStatus(e.message, 'text-danger'); }
 });
 
-$('drive-save-client').addEventListener('click', () => {
-  cancelDriveSync();
-  Drive.saveClientId($('drive-client').value.trim());
-  updateDriveStatus('Client ID saved.', 'text-success');
+$('sync-now').addEventListener('click', manualSync);
+$('sync-switch').addEventListener('click', () => {
+  if (!confirm('Sign out and sign in with a different Google account?')) return;
+  Drive.signOut();
+  location.reload();
 });
-$('drive-connect').addEventListener('click', async () => {
-  if (!Drive.status().hasClient) { updateDriveStatus('Save a client ID first.', 'text-warning'); return; }
-  cancelDriveSync();
-  updateDriveStatus('Connecting…');
-  try {
-    const file = await Drive.connect();
-    updateDriveStatus(file ? 'Drive: ' + (file.name || 'budget.db') + ' — auto-sync on' : 'Drive: connected — next change will create budget.db', 'text-success');
-  } catch (e) { updateDriveStatus(e.message, 'text-danger'); }
-});
-$('drive-open').addEventListener('click', async () => {
-  if (!Drive.status().hasClient) { updateDriveStatus('Save a client ID first.', 'text-warning'); return; }
-  cancelDriveSync();
-  suppressDriveSync = true;
-  updateDriveStatus('Opening latest…');
-  try {
-    const bytes = await Drive.openLatest();
-    await Backend.loadFromBinary(new Uint8Array(bytes));
-    dataName = 'budget.db';
-    await saveNow();
-    await enterApp();
-    updateDriveStatus();
-  } catch (e) { updateDriveStatus(e.message, 'text-danger'); }
-  finally { suppressDriveSync = false; }
-});
-$('drive-upload').addEventListener('click', async () => {
-  if (!Backend.loaded) { updateDriveStatus('No budget loaded.', 'text-warning'); return; }
-  cancelDriveSync();
-  updateDriveStatus('Uploading…');
-  try {
-    const m = await Drive.upload(Backend.exportBinary());
-    updateDriveStatus('Uploaded ' + (m.fileName || 'budget.db') + ' — auto-sync on', 'text-success');
-  } catch (e) { updateDriveStatus(e.message, 'text-danger'); }
+$('sync-signout').addEventListener('click', () => {
+  if (!confirm('Sign out of Google on this device? Your budget stays safe in Google Drive.')) return;
+  Drive.signOut();
+  location.reload();
 });
 
 $('data-save2').addEventListener('click', () => saveNow().catch(e => alert(e.message)));
@@ -1303,29 +1402,106 @@ window.addEventListener('pagehide', () => {
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && appReady) saveNow().catch(e => console.error(e));
+  if (document.visibilityState === 'visible' && appReady) pollRemote();
 });
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js?v=8', { updateViaCache: 'none' }).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=9', { updateViaCache: 'none' }).catch(() => {});
   });
+}
+
+// Pull a fresh copy from Drive and start the app with it.
+async function pullAndEnter() {
+  const r = await Drive.pull();
+  await Backend.loadFromBinary(new Uint8Array(r.bytes));
+  dataName = 'budget.db';
+  lastKnownRemoteMod = Number(r.modifiedTime) || 0;
+  localDirty = false;
+  await saveNow();
+  await enterApp();
+  updateSyncStatus();
 }
 
 (async () => {
   try {
     await Backend.init();
+
+    // 1) OAuth redirect: exchange the code for tokens.
+    const cb = Drive.handleCallback();
+    if (cb) {
+      showSignInScreen('Signing in…');
+      try {
+        await cb;
+      } catch (e) {
+        landStatus(e.message, 'text-danger');
+        return;
+      }
+    }
+
+    // 2) Sign-in guard: no valid Google sign-in → stop here.
+    if (!Drive.hasRefresh()) {
+      showSignInScreen();
+      return;
+    }
+
+    // 3) Reconcile this browser's cache with the copy in Google Drive.
     const saved = await idbGet('budget.db');
-    if (saved && saved.byteLength > 0) {
-      const meta = await idbGet('meta');
-      dataName = (meta && meta.name) || (await idbGet('name')) || 'budget.db';
+    const meta = await idbGet('meta');
+    const localSavedAt = meta ? Number(meta.savedAt) || 0 : 0;
+    const hasLocal = saved && saved.byteLength > 0;
+
+    let remote = null;
+    try {
+      remote = await Drive.fileMeta(true);
+    } catch (e) {
+      if (e.code !== 'NOT_SIGNED_IN' && hasLocal) {
+        // Drive unreachable: open the local cache, sync when it comes back.
+        dataName = 'budget.db';
+        await Backend.loadFromBinary(saved);
+        await enterApp();
+        updateSyncStatus('Offline — using this browser\'s copy', 'warning');
+        return;
+      }
+      showSignInScreen(e.message, 'text-danger');
+      return;
+    }
+
+    if (hasLocal) {
+      if (remote) {
+        const remoteMod = Number(remote.modifiedTime) || 0;
+        lastKnownRemoteMod = remoteMod;
+        if (localSavedAt > remoteMod + 15000) {
+          // This browser's copy is clearly newer than Drive's: push it.
+          dataName = 'budget.db';
+          await Backend.loadFromBinary(saved);
+          await enterApp();
+          updateSyncStatus('Pushing this browser\'s newer copy…', 'info');
+          await runDriveSync();
+        } else {
+          // Drive is newer (or in doubt): Drive wins.
+          await pullAndEnter();
+        }
+        return;
+      }
+      // Local only: one-time migration — upload it to create the Drive copy.
+      dataName = 'budget.db';
       await Backend.loadFromBinary(saved);
       await enterApp();
-    } else {
-      showLanding();
+      updateSyncStatus('Uploading your budget to Google Drive…', 'info');
+      await runDriveSync();
+      return;
     }
+
+    if (remote) {
+      await pullAndEnter();
+      return;
+    }
+
+    // 4) Nothing anywhere: let the user start or import.
+    showChoiceScreen();
   } catch (err) {
     console.error(err);
-    showLanding();
-    landStatus(err.message, 'text-danger');
+    showSignInScreen(err.message, 'text-danger');
   }
 })();

@@ -40,12 +40,15 @@ body { background-color: #f8f9fa; }
       <div class="card landing-card mx-auto">
         <div class="card-body p-4">
           <h3 class="text-center mb-1">Budget</h3>
-          <p class="text-muted text-center small mb-4">Start a budget on this device, open an existing <code>.db</code> file, or open one from Google Drive.</p>
-          <button id="land-create" class="btn btn-success w-100 mb-2">Create a new budget</button>
-          <button id="land-open-file" class="btn btn-outline-primary w-100 mb-2">Open a .db file</button>
-          <button id="land-open-drive" class="btn btn-outline-info w-100">Open from Google Drive</button>
-          <div id="land-status" class="small mt-3"></div>
-          <p class="text-muted small mt-4 mb-0">A fresh budget starts empty. Add categories in Settings, then start tracking.</p>
+          <p id="land-desc" class="text-muted text-center small mb-4">Sign in with Google to open your budget.</p>
+          <button id="land-signin" class="btn btn-primary w-100 mb-2">Sign in with Google</button>
+          <div id="land-choices" class="d-none">
+            <button id="land-create" class="btn btn-success w-100 mb-2">Start a new budget</button>
+            <button id="land-open-file" class="btn btn-outline-primary w-100 mb-2">Import a .db file</button>
+            <p class="text-muted small mt-3 mb-0"><strong>Start a new budget:</strong> an empty budget, saved to Google Drive. Add categories in Settings, then start tracking.<br>
+            <strong>Import:</strong> bring in a <code>budget.db</code> file from an older version of this app; it's uploaded to Google Drive.</p>
+          </div>
+          <div id="land-status" class="small mt-3 text-center"></div>
         </div>
       </div>
     </div>
@@ -60,12 +63,13 @@ body { background-color: #f8f9fa; }
       <span class="badge bg-primary fs-6">Balance <span id="balance"></span></span>
       <span id="data-name" class="small text-muted"></span>
       <span id="data-saved" class="small text-muted"></span>
+      <span id="sync-pill" class="badge ms-1 bg-secondary">…</span>
     </div>
     <div class="d-flex gap-2 align-items-center flex-wrap">
       <button class="btn btn-outline-secondary btn-sm" type="button" id="data-save">Save</button>
       <button class="btn btn-outline-secondary btn-sm" type="button" id="data-reload">Reload</button>
       <button class="btn btn-outline-secondary btn-sm" type="button" id="data-download">Download</button>
-      <button class="btn btn-outline-info btn-sm" type="button" id="data-drive">Drive</button>
+      <button class="btn btn-outline-info btn-sm" type="button" id="data-drive">Sync</button>
       <button class="btn btn-outline-primary btn-sm" type="button" id="period-btn">New period</button>
     </div>
   </div>
@@ -250,16 +254,13 @@ body { background-color: #f8f9fa; }
       <div class="col-lg-6">
         <div class="card h-100">
           <div class="card-body">
-            <h5>Google Drive</h5>
-            <p class="text-muted small">Save a Google OAuth client ID authorized for this site's origin, then connect to sync <code>budget.db</code>.</p>
-            <div class="input-group input-group-sm mb-2">
-              <input id="drive-client" class="form-control" placeholder="OAuth client ID">
-              <button id="drive-save-client" class="btn btn-outline-secondary">Save ID</button>
-            </div>
+            <h5>Google Drive sync</h5>
+            <p id="sync-account" class="small mb-2"></p>
+            <p class="text-muted small">Your budget is stored in Google Drive and synced automatically on every device you sign in on. Changes upload a moment after you make them, and other devices pick them up within seconds.</p>
             <div class="d-flex gap-2 flex-wrap mb-2">
-              <button id="drive-connect" class="btn btn-outline-info btn-sm">Connect</button>
-              <button id="drive-open" class="btn btn-outline-secondary btn-sm">Open latest</button>
-              <button id="drive-upload" class="btn btn-success btn-sm">Upload current</button>
+              <button id="sync-now" class="btn btn-success btn-sm">Sync now</button>
+              <button id="sync-switch" class="btn btn-outline-secondary btn-sm">Switch account</button>
+              <button id="sync-signout" class="btn btn-outline-danger btn-sm">Sign out</button>
             </div>
             <span id="drive-status" class="small text-muted"></span>
           </div>
@@ -269,14 +270,14 @@ body { background-color: #f8f9fa; }
         <div class="card h-100">
           <div class="card-body">
             <h5>Data</h5>
-            <p class="text-muted small">The budget is stored in this browser and can be downloaded as a <code>.db</code> file.</p>
+            <p class="text-muted small">Google Drive is the durable copy; this browser keeps a fast local cache so the app works even before Drive is reachable. Downloading gives a point-in-time <code>.db</code> copy.</p>
             <div class="d-flex gap-2 flex-wrap">
               <button id="data-save2" class="btn btn-outline-secondary btn-sm">Save now</button>
               <button id="data-reload2" class="btn btn-outline-secondary btn-sm">Reload saved</button>
               <button id="data-download2" class="btn btn-outline-secondary btn-sm">Download .db</button>
               <button id="data-new" class="btn btn-outline-danger btn-sm">Start fresh</button>
             </div>
-            <p class="small text-muted mt-2 mb-0">App version 8</p>
+            <p class="small text-muted mt-2 mb-0">App version 9</p>
           </div>
         </div>
       </div>
@@ -334,8 +335,8 @@ body { background-color: #f8f9fa; }
 <script>window.SQLJS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-<script src="backend.js?v=8"></script>
-<script src="drive.js?v=8"></script>
-<script src="app.js?v=8"></script>
+<script src="backend.js?v=9"></script>
+<script src="drive.js?v=9"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>

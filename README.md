@@ -4,11 +4,13 @@ Zero-based envelope budgeting PWA.
 
 ## Features
 - Envelope-based budgeting with split expenses and income.
-- Local-first storage in the browser using IndexedDB.
+- Google Drive is the durable store: sign in with Google and your `budget.db` is synced to Drive automatically on every change.
+- Near-real-time sync: while open, the app polls Drive every few seconds so other signed-in devices pick up changes in seconds.
+- Browser storage (IndexedDB) is a fast local cache so the app still opens before Drive is reachable; it never holds the only copy.
+- One-time migration: an existing local budget is uploaded to Drive on first sign-in (it is never silently overwritten).
 - Import/export of `budget.db` files.
-- Optional Google Drive backup of `budget.db`.
 - Recurring paycheck and income templates.
-- New period workflow that saves, optionally uploads to Drive, then carries forward envelope balances.
+- New period workflow that saves, uploads a period backup to Drive, then carries forward envelope balances.
 
 ## Run locally
 Serve this directory over HTTP:
@@ -21,12 +23,12 @@ Open `http://localhost:8080`.
 Deploy this directory as a project site. Use relative paths and ensure the repository is public for free GitHub Pages.
 
 ## Google Drive
-Add a Google OAuth client ID in Settings → Google Drive. The JavaScript origin should be the deployed app URL.
+Users sign in with their own Google account on first launch; no IDs or scopes to configure. The owner maintains one OAuth client (authorization code + PKCE, `drive.file` scope) with the app's deployed origin/redirect URIs; the client ID is bundled in `drive.js`.
 
 ## Files
 - `index.html` — UI
-- `app.js` — frontend behavior
+- `app.js` — frontend behavior and two-way sync orchestration
 - `backend.js` — browser SQL.js data layer
-- `drive.js` — Google Drive backup integration
+- `drive.js` — Google sign-in (OAuth code + PKCE) and Drive sync
 - `manifest.json` — PWA manifest
 - `sw.js` — service worker
