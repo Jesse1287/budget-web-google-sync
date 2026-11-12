@@ -259,6 +259,18 @@ body { background-color: #f8f9fa; }
               <input id="env-new" class="form-control" placeholder="New category">
               <button id="env-add" class="btn btn-outline-primary">Add</button>
             </div>
+            <button id="env-from-data" class="btn btn-outline-secondary btn-sm mt-2">Add categories found in my transactions</button>
+            <p class="text-muted small mt-1 mb-0">Use this after importing a file from an older version: those files keep the category list outside the database, so the names are in your transactions but not in this list.</p>
+            <details class="mt-3">
+              <summary class="small text-muted">Merge a category into another one</summary>
+              <p class="text-muted small mt-2 mb-2">Moves <em>everything</em> filed under one category onto another — transactions, split parts, income splits and saved checks — then removes the old name. Use this to retire a category that still has history. Undo is offered for 12 seconds after.</p>
+              <div class="d-flex gap-2 align-items-center flex-wrap">
+                <select id="merge-from" class="form-select form-select-sm" style="max-width:170px"></select>
+                <span class="small text-muted">into</span>
+                <select id="merge-to" class="form-select form-select-sm" style="max-width:170px"></select>
+                <button id="merge-btn" class="btn btn-outline-primary btn-sm">Merge</button>
+              </div>
+            </details>
           </div>
         </div>
       </div>
@@ -304,7 +316,7 @@ body { background-color: #f8f9fa; }
               <button id="data-new" class="btn btn-outline-danger btn-sm">Start fresh</button>
             </div>
             <p class="small text-muted mt-2 mb-0">Import is for a <code>budget.db</code> from another copy of this app — an older version, or a different Google account. The file is checked first, the budget you have now is copied to Google Drive, and only then is it replaced.</p>
-            <p class="small text-muted mt-1 mb-0">App version 14</p>
+            <p class="small text-muted mt-1 mb-0">App version 15</p>
           </div>
         </div>
       </div>
@@ -338,7 +350,8 @@ body { background-color: #f8f9fa; }
       <div class="card-header bg-white"><h6 class="mb-0">Set it up once — do these in order</h6></div>
       <div class="card-body">
         <p class="small mb-1"><strong>Step 1. Make your categories.</strong></p>
-        <p class="small text-muted">Open <strong>Settings</strong>, type a name in <strong>Categories</strong>, then click Add. It saves as soon as you add it. Use the things you spend money on: Rent, Food, Gas, Phone, Fun, Savings. You can add more later.</p>
+        <p class="small text-muted">Open <strong>Settings</strong>, type a name in <strong>Categories</strong>, then click Add. It saves as soon as you add it. Use the things you spend money on: Rent, Food, Gas, Phone, Fun, Savings. You can add more later.<br>
+        To get rid of one you stopped using, see <em>Retiring a category</em> below.</p>
 
         <p class="small mb-1 mt-3"><strong>Step 2. Add your checks.</strong></p>
         <p class="small text-muted">Open <strong>Paychecks</strong> and click <strong>+ New check</strong>. Type a name (like "Friday pay"), the take-home pay (the money that really lands in your account), then split that money into categories. Example for a $1,500 check:</p>
@@ -375,6 +388,19 @@ body { background-color: #f8f9fa; }
 
         <p class="small mb-1 mt-3"><strong>You want to see how you are doing</strong></p>
         <p class="small text-muted"><strong>Categories</strong> shows what is left in each box. Green means you still have money there. Red means you went over. <strong>Report</strong> shows where the money went this period.</p>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header bg-white"><h6 class="mb-0">Retiring a category you stopped using</h6></div>
+      <div class="card-body">
+        <p class="small text-muted mb-2">A category cannot simply vanish while old transactions still use its name. The easy way is to fold it into another one:</p>
+        <ol class="small text-muted mb-2 ps-3">
+          <li><strong>Settings → Categories</strong> and open <em>Merge a category into another one</em>.</li>
+          <li>Pick the name to get rid of on the left, and the name to keep on the right.</li>
+          <li>Click <strong>Merge</strong>. Every transaction, split part, income split and saved check that used the old name moves to the new one, the old name leaves the list, and the money moves with it.</li>
+        </ol>
+        <p class="small text-muted mb-0">Undo is offered for 12 seconds if you picked the wrong pair. To drop a category <em>without</em> moving its money, set its amount to 0 in the <strong>New period</strong> grid instead.</p>
       </div>
     </div>
 
@@ -466,8 +492,8 @@ body { background-color: #f8f9fa; }
 <script>window.SQLJS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-<script src="backend.js?v=14"></script>
-<script src="drive.js?v=14"></script>
-<script src="app.js?v=14"></script>
+<script src="backend.js?v=15"></script>
+<script src="drive.js?v=15"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>

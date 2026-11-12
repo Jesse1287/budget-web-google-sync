@@ -393,6 +393,8 @@ const Backend = {
             else if (route === 'period/close') result = this._closePeriod(body);
             else if (route === 'paychecks') result = this._createPaycheck(body);
             else if (seg[0] === 'transactions' && seg[2] === 'split') result = this._splitTransaction(parseInt(seg[1], 10), body);
+            else if (seg[0] === 'categories' && seg[1] === 'merge') result = this._mergeCategory(body.from, body.to);
+            else if (seg[0] === 'categories' && seg[1] === 'from-data') result = this._seedCategoriesFromData();
             else if (route === 'config') result = this._saveConfig(body);
             else throw new Error('unknown route: ' + route);
             this._dirty();
@@ -669,6 +671,96 @@ const Backend = {
     _deletePaycheck(pkId) {
         this.run('DELETE FROM paychecks WHERE id=?', [pkId]);
         return { status: 'ok' };
+    },
+
+    // A file from the server-era app keeps its category list in config.json, so
+    // it arrives with an empty saved list while the transactions still carry the
+    // names. Rebuild the list from those names instead of asking the user to
+    // retype every category. Safe to run twice: it only adds names not already
+    // in the list, and never invents one that no transaction uses.
+    _categoriesFromData() {
+        const cur = this.cfg();
+        const have = cur.envelopes.map(e => e.toLowerCase());
+        return this.categories()
+            .filter(c => c !== cur.review_category)
+            .filter(c => !have.includes(c.toLowerCase()));
+    },
+
+    _seedCategoriesFromData() {
+        const added = this._categoriesFromData();
+        const cur = this.cfg();
+        if (added.length) {
+            this.saveCfg({
+                envelopes: cur.envelopes.concat(added),
+                review_category: cur.review_category,
+                keywords: cur.keywords
+            });
+            this._dirty();
+        }
+        return { added: added };
+    },
+
+    // Move everything filed under one category onto another, then drop the old
+    // name from the saved list. Retiring a category by hand means touching
+    // expenses, split parts, income splits, saved checks and the keyword rules
+    // separately, and missing one leaves the name alive forever.
+    _mergeCategory(from, to) {
+        const src = String(from || '').trim();
+        const dst = String(to || '').trim();
+        if (!src || !dst) throw new Error('pick the category to remove and the one to keep');
+        if (src === dst) throw new Error('pick two different categories');
+        if (src === PARENT_MARKER || dst === PARENT_MARKER) throw new Error('that category cannot be merged');
+        const cur = this.cfg();
+        // The review bucket is not an envelope: its balance is deliberately
+        // outside the total, so merging in or out of it would move money
+        // nowhere. Renaming it is the supported way to change it.
+        const rev = cur.review_category.toLowerCase();
+        if (src.toLowerCase() === rev || dst.toLowerCase() === rev) {
+            throw new Error('"' + cur.review_category + '" is the review category — rename it in Settings instead of merging it');
+        }
+        // The name has to exist somewhere, or the button would silently do nothing.
+        const known = this.categories().map(c => c.toLowerCase());
+        if (!known.includes(src.toLowerCase())) throw new Error('"' + src + '" is not a category any more');
+
+        let transactions = 0;
+        for (const r of this.qAll('SELECT COUNT(*) AS n FROM transactions WHERE category=?', [src])) transactions = r.n;
+        let allocations = 0;
+        for (const r of this.qAll('SELECT COUNT(*) AS n FROM paycheck_allocations WHERE category=?', [src])) allocations = r.n;
+
+        this.run('UPDATE transactions SET category=? WHERE category=?', [dst, src]);
+        this.run('UPDATE paycheck_allocations SET category=? WHERE category=?', [dst, src]);
+
+        // A saved check that paid both names now has two lines for the same
+        // category: fold them into one so the split still shows once.
+        for (const pk of this.qAll('SELECT DISTINCT paycheck_id FROM paycheck_allocations WHERE category=?', [dst])) {
+            const rows = this.qAll('SELECT id, amount FROM paycheck_allocations WHERE paycheck_id=? AND category=? ORDER BY id', [pk.paycheck_id, dst]);
+            if (rows.length < 2) continue;
+            const total = rows.reduce((s, r) => s + r.amount, 0);
+            this.run('UPDATE paycheck_allocations SET amount=? WHERE id=?', [round2(total), rows[0].id]);
+            for (const r of rows.slice(1)) this.run('DELETE FROM paycheck_allocations WHERE id=?', [r.id]);
+        }
+
+        // Saved list: the old name goes, the survivor stays exactly once. If the
+        // survivor was not listed yet it takes the old name's slot, so the order
+        // does not jump around; otherwise the old slot is simply closed up.
+        let envelopes = cur.envelopes.slice();
+        const at = envelopes.findIndex(e => e.toLowerCase() === src.toLowerCase());
+        const hasDst = envelopes.some(e => e.toLowerCase() === dst.toLowerCase());
+        if (at >= 0) {
+            if (hasDst) envelopes.splice(at, 1);
+            else envelopes[at] = dst;
+        }
+
+        const keywords = Object.assign({}, cur.keywords);
+        Object.keys(keywords).forEach(k => { if (keywords[k] === src) keywords[k] = dst; });
+
+        this.saveCfg({
+            envelopes: envelopes,
+            review_category: cur.review_category,
+            keywords: keywords
+        });
+        this._dirty();
+        return { from: src, to: dst, transactions: transactions, allocations: allocations };
     },
 
     _saveConfig(body) {

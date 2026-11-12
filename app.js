@@ -466,6 +466,22 @@ function fillCategorySelects() {
   $('add-category').innerHTML = opts;
   $('tx-filter-category').innerHTML = '<option value="">All categories</option>' + opts;
   $('pk-envelopes').innerHTML = categories.map(c => `<option value="${esc(c)}">`).join('');
+  fillMergeSelects();
+}
+
+// Settings → Categories → merge pickers. The review bucket is left out: it is
+// not an envelope, and the backend refuses to merge it.
+function fillMergeSelects() {
+  const from = $('merge-from'), to = $('merge-to');
+  if (!from || !to) return;
+  const list = categories.filter(c => c !== REVIEW_CAT);
+  const opts = '<option value="">— pick one —</option>' + list.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  const keep = [from.value, to.value];
+  from.innerHTML = opts;
+  to.innerHTML = opts;
+  if (list.includes(keep[0])) from.value = keep[0];
+  if (list.includes(keep[1])) to.value = keep[1];
+  $('merge-btn').disabled = list.length < 2;
 }
 
 function updateHintList() {
@@ -1230,7 +1246,7 @@ async function importBudgetFile(file) {
 
   const msg = 'This file has ' + parts.join(', ') + '.\n\n' +
     (info.categories ? '' :
-      'It has no saved category list of its own — the older server version kept categories in config.json. Your transactions still show under the right category names, but add your categories on the Categories tab so they appear in the menus and settings.\n\n') +
+      'It has no saved category list of its own — the older server version kept categories in config.json — so the list will be rebuilt from the category names already on the transactions.\n\n') +
     'Replace the budget on ALL your devices with this file? A copy of the budget you have now is saved to Google Drive first.';
   if (!confirm(msg)) return;
 
@@ -1262,6 +1278,11 @@ async function importBudgetFile(file) {
   }
 
   dataName = 'budget.db';
+  // An imported server-era file has transactions but no saved category list:
+  // rebuild the list from the names in the file so Settings and the pickers
+  // are not empty. Only adds names that are actually used.
+  let added = [];
+  try { added = (await japi('/api/categories/from-data', 'POST', {})).added || []; } catch (e) {}
   await saveNow();
   await enterApp();
 
@@ -1277,7 +1298,8 @@ async function importBudgetFile(file) {
     } catch (e) { scheduleDriveSync(); }
   }
 
-  setSettingsStatus('Imported ' + parts.join(', ') + '.', 'text-success');
+  setSettingsStatus('Imported ' + parts.join(', ') + '.' +
+    (added.length ? ' Added ' + added.length + ' categories found in the file to your list.' : ''), 'text-success');
   if (!info.categories) showTab('categories');
 }
 
@@ -1650,6 +1672,52 @@ $('env-chips').addEventListener('click', e => {
   const rm = e.target.closest('.env-rm');
   if (rm) { envDraft.splice(parseInt(rm.dataset.i, 10), 1); renderEnvChips(); saveEnvelopes(); }
 });
+
+// Merge one category into another: the clean way to retire an old name that
+// still has transactions, split parts or check lines on it.
+$('merge-btn').addEventListener('click', async () => {
+  const from = $('merge-from').value;
+  const to = $('merge-to').value;
+  if (!from || !to) { setSettingsStatus('Pick the category to remove and the one to keep.', 'text-warning'); return; }
+  if (from === to) { setSettingsStatus('Pick two different categories.', 'text-warning'); return; }
+  if (!confirm('Move everything filed under "' + from + '" onto "' + to + '", then remove "' + from + '"?\n\nThis changes every transaction, split and saved check that uses it, on every device.')) return;
+  const snapshot = Backend.exportBinary();
+  try {
+    setSettingsStatus('Merging…');
+    const r = await japi('/api/categories/merge', 'POST', { from: from, to: to });
+    offerUndo('"' + r.from + '" merged into "' + r.to + '".', snapshot);
+    await loadSettings();
+    await loadCategories(true);
+    await refreshApp();
+    const bits = [r.transactions + (r.transactions === 1 ? ' transaction' : ' transactions')];
+    if (r.allocations) bits.push(r.allocations + (r.allocations === 1 ? ' check line' : ' check lines'));
+    setSettingsStatus('Merged ' + bits.join(' and ') + ' into "' + r.to + '".', 'text-success');
+  } catch (e) {
+    setSettingsStatus(e.message, 'text-danger');
+  }
+});
+$('merge-from').addEventListener('change', () => {
+  if ($('merge-from').value && $('merge-from').value === $('merge-to').value) $('merge-to').value = '';
+});
+
+// Files from the server-era app carry the category names in their transactions
+// but no saved list; this puts them back into Settings without retyping.
+$('env-from-data').addEventListener('click', async () => {
+  try {
+    setSettingsStatus('Looking through your transactions…');
+    const r = await japi('/api/categories/from-data', 'POST', {});
+    await loadSettings();
+    await loadCategories(true);
+    await refreshApp();
+    if (r.added.length) {
+      setSettingsStatus('Added ' + r.added.length + (r.added.length === 1 ? ' category' : ' categories') + ': ' + r.added.join(', ') + '.', 'text-success');
+    } else {
+      setSettingsStatus('Nothing to add — every category used in your transactions is already in the list.', 'text-muted');
+    }
+  } catch (e) {
+    setSettingsStatus(e.message, 'text-danger');
+  }
+});
 $('settings-save').addEventListener('click', async () => {
   try {
     setSettingsStatus('Saving…');
@@ -1714,7 +1782,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=14', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=15', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };

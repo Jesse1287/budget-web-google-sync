@@ -1,4 +1,4 @@
-const CACHE = 'roux-budget-web-v14';
+const CACHE = 'roux-budget-web-v15';
 const PRECACHE = [
   './',
   './manifest.json',
