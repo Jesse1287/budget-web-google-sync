@@ -1674,14 +1674,33 @@ $('env-chips').addEventListener('click', e => {
 });
 
 // Merge one category into another: the clean way to retire an old name that
-// still has transactions, split parts or check lines on it.
-$('merge-btn').addEventListener('click', async () => {
+// still has transactions, split parts or check lines on it. A merge rewrites
+// history in place, so a copy goes to Drive first — that copy is what makes a
+// wrong pick recoverable after the 12-second Undo has gone.
+async function mergeCategories() {
   const from = $('merge-from').value;
   const to = $('merge-to').value;
   if (!from || !to) { setSettingsStatus('Pick the category to remove and the one to keep.', 'text-warning'); return; }
   if (from === to) { setSettingsStatus('Pick two different categories.', 'text-warning'); return; }
   if (!confirm('Move everything filed under "' + from + '" onto "' + to + '", then remove "' + from + '"?\n\nThis changes every transaction, split and saved check that uses it, on every device.')) return;
-  const snapshot = Backend.exportBinary();
+
+  const snapshot = Backend.exportBinary(); // for the 12-second Undo
+
+  let driveCopy = false;
+  if (Drive.hasRefresh()) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    try {
+      setSettingsStatus('Saving a copy of your budget to Google Drive first…');
+      await Drive.uploadBackup('budget-before-merge-' + stamp + '.db', snapshot);
+      driveCopy = true;
+    } catch (err) {
+      if (!confirm('The Google Drive copy failed: ' + err.message + '\n\nMerge anyway? Undo will still be offered for 12 seconds.')) {
+        setSettingsStatus('Merge cancelled — nothing was changed.');
+        return;
+      }
+    }
+  }
+
   try {
     setSettingsStatus('Merging…');
     const r = await japi('/api/categories/merge', 'POST', { from: from, to: to });
@@ -1691,11 +1710,13 @@ $('merge-btn').addEventListener('click', async () => {
     await refreshApp();
     const bits = [r.transactions + (r.transactions === 1 ? ' transaction' : ' transactions')];
     if (r.allocations) bits.push(r.allocations + (r.allocations === 1 ? ' check line' : ' check lines'));
-    setSettingsStatus('Merged ' + bits.join(' and ') + ' into "' + r.to + '".', 'text-success');
+    setSettingsStatus('Merged ' + bits.join(' and ') + ' into "' + r.to + '".' +
+      (driveCopy ? ' A copy from before the merge is in Google Drive.' : ''), 'text-success');
   } catch (e) {
     setSettingsStatus(e.message, 'text-danger');
   }
-});
+}
+$('merge-btn').addEventListener('click', mergeCategories);
 $('merge-from').addEventListener('change', () => {
   if ($('merge-from').value && $('merge-from').value === $('merge-to').value) $('merge-to').value = '';
 });
@@ -1782,7 +1803,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=15', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=16', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };

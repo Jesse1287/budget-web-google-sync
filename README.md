@@ -12,7 +12,7 @@ Zero-based envelope budgeting PWA.
 - Built-in **Help** tab: a plain-language setup guide (categories → checks → today's balance) plus everyday use, periods, and sync.
 - Safety nets: **Undo** after a delete, a daily rolling backup in Drive (last 7 kept), a local `.db` copy when a period closes, and a conflict prompt when two devices change the budget at the same time.
 - Recurring paycheck and income templates.
-- Category housekeeping: **merge one category into another** (moves every transaction, split part, income split and saved check, then retires the name, with Undo), and **rebuild the category list from transactions** — what an imported server-era file needs, since its list lives in `config.json`.
+- Category housekeeping: **merge one category into another** (moves every transaction, split part, income split and saved check, then retires the name, with Undo and a `budget-before-merge-…db` copy in Drive first), and **rebuild the category list from transactions** — what an imported server-era file needs, since its list lives in `config.json`.
 - New period workflow that saves, uploads a period backup to Drive, then carries forward envelope balances.
 
 ## Run locally
