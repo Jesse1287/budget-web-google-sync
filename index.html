@@ -48,6 +48,8 @@ body { background-color: #f8f9fa; }
             <p class="text-muted small mt-3 mb-0"><strong>Start a new budget:</strong> an empty budget, saved to Google Drive. Add categories in Settings, then start tracking.<br>
             <strong>Import:</strong> bring in a <code>budget.db</code> file from an older version of this app; it's uploaded to Google Drive.</p>
           </div>
+          <div id="land-files" class="d-none mt-3"></div>
+          <button id="land-retry" class="btn btn-outline-secondary w-100 mt-3 d-none">Try again</button>
           <div id="land-status" class="small mt-3 text-center"></div>
           <details class="mt-3">
             <summary class="small text-muted">New here? How to use this app</summary>
@@ -299,6 +301,9 @@ body { background-color: #f8f9fa; }
               <button id="sync-switch" class="btn btn-outline-secondary btn-sm">Switch account</button>
               <button id="sync-signout" class="btn btn-outline-danger btn-sm">Sign out</button>
             </div>
+            <button id="drive-find" class="btn btn-outline-secondary btn-sm">Find my budget in Drive</button>
+            <div id="drive-files" class="d-none mt-2"></div>
+            <p class="text-muted small mt-2 mb-1">Signing in on a new device opens the budget that is already in Drive. If more than one budget file exists, the app asks which one is yours instead of guessing — that list is also what this button shows.</p>
             <span id="drive-status" class="small text-muted"></span>
           </div>
         </div>
@@ -316,7 +321,7 @@ body { background-color: #f8f9fa; }
               <button id="data-new" class="btn btn-outline-danger btn-sm">Start fresh</button>
             </div>
             <p class="small text-muted mt-2 mb-0">Import is for a <code>budget.db</code> from another copy of this app — an older version, or a different Google account. The file is checked first, the budget you have now is copied to Google Drive, and only then is it replaced.</p>
-            <p class="small text-muted mt-1 mb-0">App version 16</p>
+            <p class="small text-muted mt-1 mb-0">App version 17</p>
           </div>
         </div>
       </div>
@@ -425,6 +430,7 @@ body { background-color: #f8f9fa; }
           <li>To fix a mistake, use the buttons on the transaction row: change the category, split it, edit it, or delete it.</li>
           <li><strong>Settings → Data → Download .db</strong> saves a copy of your budget on your device. <strong>Start fresh</strong> makes a new empty budget for every device; it uploads a backup of the old one first.</li>
           <li><strong>Coming from an older copy of this app?</strong> If your old budget does not show up here, open <strong>Settings → Data → Import .db</strong> and pick its <code>budget.db</code> file (download it from Google Drive first if that is where it is). The file is checked before anything is replaced, and the budget you have now is copied to Google Drive first.</li>
+          <li><strong>Signing in on a new device</strong> opens the budget already in Google Drive — it does not start a new one. If Drive has more than one budget file, you get a list ("which one is yours?") rather than an automatic choice; <strong>Settings → Drive → Find my budget in Drive</strong> shows the same list later, and the file you pick is remembered on that device.</li>
         </ul>
       </div>
     </div>
@@ -492,8 +498,8 @@ body { background-color: #f8f9fa; }
 <script>window.SQLJS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-<script src="backend.js?v=16"></script>
-<script src="drive.js?v=16"></script>
-<script src="app.js?v=16"></script>
+<script src="backend.js?v=17"></script>
+<script src="drive.js?v=17"></script>
+<script src="app.js?v=17"></script>
 </body>
 </html>

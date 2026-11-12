@@ -5,6 +5,19 @@ const japi = (path, method, body) => api(path, { method, headers: { 'Content-Typ
 const fmt = n => (n === null || n === undefined) ? '—' : '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Google Drive reports modifiedTime as an RFC3339 string, and Number() of that is
+// NaN. Every comparison here used to be "0 > 0", which meant a browser with an
+// old cache could decide it was newer than Drive and overwrite it, and polling
+// never noticed another device's changes. All Drive timestamps go through this.
+const msOf = t => {
+  if (typeof t === 'number') return Number.isFinite(t) && t > 0 ? t : 0;
+  if (!t) return 0;
+  const n = Number(t);
+  if (Number.isFinite(n) && n > 0) return n;
+  const p = Date.parse(t);
+  return Number.isFinite(p) ? p : 0;
+};
+
 let categories = [];
 let hints = {};
 let pkDirty = false;
@@ -117,6 +130,9 @@ function showSignInScreen(msg, cls) {
   $('land-desc').textContent = 'Sign in with Google to open your budget. It lives in Google Drive and syncs automatically on every device you sign in on.';
   $('land-signin').classList.remove('d-none');
   $('land-choices').classList.add('d-none');
+  $('land-retry').classList.add('d-none');
+  const lf = $('land-files');
+  if (lf) { lf.innerHTML = ''; lf.classList.add('d-none'); }
   landStatus(msg, cls);
 }
 
@@ -126,11 +142,34 @@ function showChoiceScreen(msg, cls) {
   $('land-desc').textContent = 'No budget found in Google Drive for this account yet.';
   $('land-signin').classList.add('d-none');
   $('land-choices').classList.remove('d-none');
+  $('land-retry').classList.add('d-none');
+  const lf = $('land-files');
+  if (lf) { lf.innerHTML = ''; lf.classList.add('d-none'); }
   landStatus(msg, cls);
+}
+
+// Drive could not be read at all. Offering "start a new budget" here is what
+// produced duplicate files, so this screen offers only a retry.
+function showRetryScreen(msg) {
+  showLanding();
+  $('land-desc').textContent = 'Your budget lives in Google Drive, and Drive could not be read just now.';
+  $('land-signin').classList.add('d-none');
+  $('land-choices').classList.add('d-none');
+  const lf = $('land-files');
+  if (lf) { lf.innerHTML = ''; lf.classList.add('d-none'); }
+  $('land-retry').classList.remove('d-none');
+  landStatus(msg || 'Nothing was changed. Try again in a moment.', 'text-warning');
 }
 
 function setSettingsStatus(msg, cls) {
   const el = $('settings-status');
+  el.textContent = msg || '';
+  el.className = 'small ' + (cls || 'text-muted');
+}
+
+// Status line inside the Drive card, next to "Find my budget in Drive".
+function setDriveStatus(msg, cls) {
+  const el = $('drive-status');
   el.textContent = msg || '';
   el.className = 'small ' + (cls || 'text-muted');
 }
@@ -233,11 +272,12 @@ async function runDriveSync() {
   try {
     await saveNow();
     // Another device may have written while this one was editing: never
-    // overwrite it silently, ask which copy to keep.
-    let meta = null;
-    try { meta = await Drive.fileMeta(false); } catch (e) { if (e.code === 'NOT_SIGNED_IN') throw e; }
+    // overwrite it silently, ask which copy to keep. Any lookup failure also
+    // stops here — pushing without knowing whether a file exists creates a
+    // second budget.db, so it must surface as a sync error instead.
+    const meta = await Drive.fileMeta(false);
     if (meta && remoteIsNewer(meta.modifiedTime)) {
-      conflictPending = { remoteModified: Number(meta.modifiedTime) || 0 };
+      conflictPending = { remoteModified: msOf(meta.modifiedTime) };
       $('conflict-banner').classList.remove('d-none');
       updateSyncStatus('Conflict — choose which copy to keep', 'warning');
       return;
@@ -246,6 +286,12 @@ async function runDriveSync() {
   } catch (e) {
     if (e.code === 'NOT_SIGNED_IN') {
       updateSyncStatus('Sign-in expired — tap Sign in (Settings)', 'danger');
+      return;
+    }
+    if (e.code === 'PICK_FILE') {
+      // Not a transient problem: retrying would just keep failing (and could
+      // create a duplicate). The fix is choosing the file in Settings.
+      updateSyncStatus(e.message, 'danger');
       return;
     }
     updateSyncStatus('Sync error — ' + e.message + ' (retrying)', 'danger');
@@ -261,7 +307,7 @@ async function runDriveSync() {
 
 async function pushNow() {
   const m = await Drive.push(Backend.exportBinary());
-  lastKnownRemoteMod = Number(m.modifiedTime) || lastKnownRemoteMod;
+  lastKnownRemoteMod = msOf(m.modifiedTime) || lastKnownRemoteMod;
   localDirty = false;
   clearDriveRetry();
   updateSyncStatus();
@@ -269,7 +315,7 @@ async function pushNow() {
 }
 
 function remoteIsNewer(modifiedTime) {
-  const m = Number(modifiedTime) || 0;
+  const m = msOf(modifiedTime);
   return Boolean(m) && lastKnownRemoteMod > 0 && m > lastKnownRemoteMod + 1500;
 }
 
@@ -359,7 +405,7 @@ async function pullRemote(msg) {
   try {
     const r = await Drive.pull();
     await Backend.loadFromBinary(new Uint8Array(r.bytes));
-    lastKnownRemoteMod = Number(r.modifiedTime) || 0;
+    lastKnownRemoteMod = msOf(r.modifiedTime);
     localDirty = false;
     await enterApp();
     updateSyncStatus();
@@ -396,7 +442,7 @@ async function pollRemote() {
   try {
     const meta = await Drive.fileMeta(false);
     if (meta && meta.modifiedTime) {
-      const mod = Number(meta.modifiedTime);
+      const mod = msOf(meta.modifiedTime);
       if (mod > lastKnownRemoteMod) {
         await pullRemote('New changes on another device…');
       } else if (!lastKnownRemoteMod) {
@@ -424,13 +470,13 @@ async function manualSync() {
     await saveNow();
     localDirty = false;
     const meta = await Drive.fileMeta(true);
-    if (meta && meta.modifiedTime && Number(meta.modifiedTime) > lastKnownRemoteMod) {
+    if (meta && meta.modifiedTime && msOf(meta.modifiedTime) > lastKnownRemoteMod) {
       await pullRemote('Syncing…');
     } else {
       driveSyncBusy = true;
       updateSyncStatus('Syncing…', 'info');
       const m = await Drive.push(Backend.exportBinary());
-      lastKnownRemoteMod = Number(m.modifiedTime) || lastKnownRemoteMod;
+      lastKnownRemoteMod = msOf(m.modifiedTime) || lastKnownRemoteMod;
       updateSyncStatus();
     }
   } catch (e) {
@@ -1293,7 +1339,7 @@ async function importBudgetFile(file) {
     try {
       let meta = null;
       try { meta = await Drive.fileMeta(false); } catch (e) { if (e.code === 'NOT_SIGNED_IN') throw e; }
-      if (meta) lastKnownRemoteMod = Number(meta.modifiedTime) || 0;
+      if (meta) lastKnownRemoteMod = msOf(meta.modifiedTime);
       await runDriveSync();
     } catch (e) { scheduleDriveSync(); }
   }
@@ -1453,6 +1499,7 @@ $('land-signin').addEventListener('click', async () => {
 });
 $('land-create').addEventListener('click', createBudget);
 $('land-open-file').addEventListener('click', () => $('file-input').click());
+$('land-retry').addEventListener('click', () => location.reload());
 $('file-input').addEventListener('change', e => {
   if (e.target.files[0]) openFile(e.target.files[0]);
   e.target.value = '';
@@ -1748,6 +1795,21 @@ $('settings-save').addEventListener('click', async () => {
 });
 
 $('sync-now').addEventListener('click', manualSync);
+$('drive-find').addEventListener('click', async () => {
+  try {
+    setDriveStatus('Looking in Google Drive…');
+    const files = await Drive.listBudgetFiles();
+    if (!files.length) {
+      setDriveStatus('No budget files found in this Google account.', 'text-warning');
+      $('drive-files').classList.add('d-none');
+      return;
+    }
+    renderFoundFiles(files, 'drive-files', setDriveStatus, false, Drive.status().fileId);
+    setDriveStatus(files.length + (files.length === 1 ? ' file found — pick the one to use.' : ' files found — pick the one to use.'));
+  } catch (e) {
+    setDriveStatus(e.message, 'text-danger');
+  }
+});
 $('sync-switch').addEventListener('click', () => {
   if (!confirm('Sign out and sign in with a different Google account?')) return;
   Drive.signOut();
@@ -1803,7 +1865,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=16', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=17', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };
@@ -1825,11 +1887,77 @@ async function pullAndEnter() {
   const r = await Drive.pull();
   await Backend.loadFromBinary(new Uint8Array(r.bytes));
   dataName = 'budget.db';
-  lastKnownRemoteMod = Number(r.modifiedTime) || 0;
+  lastKnownRemoteMod = msOf(r.modifiedTime);
   localDirty = false;
   await saveNow();
   await enterApp();
   updateSyncStatus();
+}
+
+// "Which one is yours?" list, used on the sign-in card and in Settings. Rows
+// come from Drive.listBudgetFiles(), which only sees files this app created.
+function renderFoundFiles(files, containerId, statusFn, hasLocal, currentId) {
+  const el = $(containerId);
+  if (!el) return;
+  const when = t => t ? new Date(t).toLocaleString() : 'date unknown';
+  const size = n => Number(n) > 0 ? ' · ' + (Number(n) / 1048576).toFixed(1) + ' MB' : '';
+  el.innerHTML = files.map(f => `
+    <div class="d-flex align-items-center justify-content-between gap-2 border-top py-2">
+      <div class="small">
+        <div><strong>${esc(f.name)}</strong>${currentId && f.id === currentId ? ' <span class="badge bg-secondary">in use</span>' : ''}</div>
+        <div class="text-muted">${when(f.modifiedTime)}${size(f.size)}</div>
+      </div>
+      <button class="btn btn-primary btn-sm" data-adopt-file="${esc(f.id)}" data-adopt-name="${esc(f.name)}">Use this</button>
+    </div>`).join('') +
+    `<div class="border-top pt-2 d-flex flex-wrap gap-2">
+      ${hasLocal ? `<button class="btn btn-outline-secondary btn-sm" id="keep-local">No — upload this browser's copy</button>` : ''}
+      <button class="btn btn-outline-secondary btn-sm" id="pick-import">None of these — import a .db file</button>
+    </div>`;
+  el.classList.remove('d-none');
+  el.querySelectorAll('[data-adopt-file]').forEach(b => {
+    b.addEventListener('click', () => adoptDriveFile(b.dataset.adoptFile, b.dataset.adoptName));
+  });
+  const keep = el.querySelector('#keep-local');
+  if (keep) keep.addEventListener('click', uploadLocalCopy);
+  const imp = el.querySelector('#pick-import');
+  if (imp) imp.addEventListener('click', () => $('file-input').click());
+}
+
+// Open a specific file and remember it, so later saves update that file instead
+// of creating another one.
+async function adoptDriveFile(id, name) {
+  const statusFn = appReady ? setSettingsStatus : landStatus;
+  cancelDriveSync();
+  try {
+    statusFn('Opening ' + name + '…');
+    const r = await Drive.pullFile(id);
+    await Backend.loadFromBinary(new Uint8Array(r.bytes));
+    Drive.setFile(id, r.fileName || name);
+    dataName = 'budget.db';
+    lastKnownRemoteMod = msOf(r.modifiedTime);
+    localDirty = false;
+    await saveNow();
+    await enterApp();
+    updateSyncStatus();
+    setSettingsStatus('Now using ' + (r.fileName || name) + ' from Google Drive.', 'text-success');
+  } catch (e) {
+    statusFn(e.message, 'text-danger');
+  }
+}
+
+async function uploadLocalCopy() {
+  try {
+    landStatus('Uploading this browser\'s copy…');
+    const saved = await idbGet('budget.db');
+    if (!saved) throw new Error('Nothing saved in this browser.');
+    await Backend.loadFromBinary(new Uint8Array(saved));
+    dataName = 'budget.db';
+    await saveNow();
+    await enterApp();
+    await runDriveSync();
+  } catch (e) {
+    landStatus(e.message, 'text-danger');
+  }
 }
 
 (async () => {
@@ -1858,13 +1986,24 @@ async function pullAndEnter() {
     const saved = await idbGet('budget.db');
     const meta = await idbGet('meta');
     const localSavedAt = meta ? Number(meta.savedAt) || 0 : 0;
-    const hasLocal = saved && saved.byteLength > 0;
+    const hasLocal = Boolean(saved && saved.byteLength > 0);
 
     let remote = null;
+    // One listing call decides both questions: does a budget exist, and is there
+    // more than one candidate? A failure here must never be read as "no budget".
+    let files = [];
+    let listOk = true;
     try {
       remote = await Drive.fileMeta(true);
     } catch (e) {
-      if (e.code !== 'NOT_SIGNED_IN' && hasLocal) {
+      // A sign-in problem is the only reason to send someone back to the
+      // sign-in card. Anything else (network, Drive 5xx, a rate limit) means
+      // "we cannot see the budget right now" — retry, and never start over.
+      if (e.code === 'NOT_SIGNED_IN') {
+        showSignInScreen(e.message, 'text-danger');
+        return;
+      }
+      if (hasLocal) {
         // Drive unreachable: open the local cache, sync when it comes back.
         dataName = 'budget.db';
         await Backend.loadFromBinary(saved);
@@ -1872,13 +2011,32 @@ async function pullAndEnter() {
         updateSyncStatus('Offline — using this browser\'s copy', 'warning');
         return;
       }
-      showSignInScreen(e.message, 'text-danger');
+      showRetryScreen('Google Drive could not be read just now (' + e.message + '), so nothing was opened or created.');
+      return;
+    }
+    try { files = await Drive.listBudgetFiles(); } catch (e) { listOk = false; }
+
+    // Nothing readable: do not offer to create anything.
+    if (!remote && !listOk) {
+      showRetryScreen('Google Drive could not be read just now, so nothing was opened or created.');
       return;
     }
 
-    if (hasLocal) {
-      if (remote) {
-        const remoteMod = Number(remote.modifiedTime) || 0;
+    if (remote) {
+      // Two files with the same name are the usual aftermath of the old bug:
+      // the app used to POST a new budget.db whenever a lookup went unanswered.
+      // Let the user say which one is theirs instead of quietly taking the
+      // newest (which can be the empty one).
+      const sameName = files.filter(f => (f.name || '') === 'budget.db');
+      if (sameName.length > 1) {
+        showChoiceScreen('There are ' + sameName.length + ' files called budget.db in your Google Drive. Pick the one that has your budget' + (hasLocal ? " — or upload this browser's copy." : '.'));
+        $('land-desc').textContent = 'Your budget is in Google Drive, but there is more than one file to choose from.';
+        $('land-choices').classList.add('d-none'); // never add a third file here
+        renderFoundFiles(sameName, 'land-files', landStatus, hasLocal, Drive.status().fileId);
+        return;
+      }
+      if (hasLocal) {
+        const remoteMod = msOf(remote.modifiedTime);
         lastKnownRemoteMod = remoteMod;
         if (localSavedAt > remoteMod + 15000) {
           // This browser's copy is clearly newer than Drive's: push it.
@@ -1893,17 +2051,30 @@ async function pullAndEnter() {
         }
         return;
       }
+      await pullAndEnter();
+      return;
+    }
+
+    // No budget.db in Drive. Before offering to start fresh (or to upload this
+    // browser's cache, which would create another file), look for anything
+    // budget-shaped — a renamed file, a "budget (1).db" copy, an older version.
+    if (files.length) {
+      showChoiceScreen(files.length === 1
+        ? 'Found a budget file in your Google Drive.'
+        : 'Found ' + files.length + ' budget files in your Google Drive. Pick the one that has your budget.');
+      $('land-desc').textContent = 'Your budget is in Google Drive. Pick the file to open below.';
+      $('land-choices').classList.add('d-none'); // a picker, not an invitation to create another
+      renderFoundFiles(files, 'land-files', landStatus, hasLocal, '');
+      return;
+    }
+
+    if (hasLocal) {
       // Local only: one-time migration — upload it to create the Drive copy.
       dataName = 'budget.db';
       await Backend.loadFromBinary(saved);
       await enterApp();
       updateSyncStatus('Uploading your budget to Google Drive…', 'info');
       await runDriveSync();
-      return;
-    }
-
-    if (remote) {
-      await pullAndEnter();
       return;
     }
 

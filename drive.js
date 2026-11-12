@@ -40,6 +40,18 @@
   function lsSet(key, value) { try { localStorage.setItem(key, value); } catch {} }
   function lsDel(key) { try { localStorage.removeItem(key); } catch {} }
 
+  // Drive returns modifiedTime as RFC3339 ("2026-11-12T10:00:00.000Z"); Number()
+  // of that is NaN, so timestamps are parsed here instead. Epoch millis pass
+  // straight through, which keeps older stored values working.
+  function msOf(t) {
+    if (typeof t === 'number') return Number.isFinite(t) && t > 0 ? t : 0;
+    if (!t) return 0;
+    const n = Number(t);
+    if (Number.isFinite(n) && n > 0) return n;
+    const p = Date.parse(t);
+    return Number.isFinite(p) ? p : 0;
+  }
+
   function account() {
     const raw = lsGet(K.account);
     if (!raw) return null;
@@ -285,6 +297,25 @@
     return data.files && data.files[0] ? data.files[0] : null;
   }
 
+  // Every budget-shaped file this app can see. drive.file only reaches files the
+  // app itself created, so this is exactly the set a user may have ended up with
+  // after a rename, a copy ("budget (1).db") or an older version of the app.
+  // Backups are skipped: they are there to be restored deliberately.
+  async function listBudgetFiles() {
+    const q = new URLSearchParams({
+      q: "trashed=false and name contains '.db'",
+      fields: 'files(id,name,modifiedTime,size)',
+      orderBy: 'modifiedTime desc',
+      pageSize: '100'
+    }).toString();
+    const res = await request(API_FILES + '?' + q, undefined, true, false);
+    const data = await res.json().catch(() => ({}));
+    return (data.files || []).filter(f => {
+      const n = f.name || '';
+      return /\.db$/i.test(n) && !/^budget-(backup|before-merge)-/i.test(n);
+    });
+  }
+
   // Metadata for the current budget file (by stored id, by name, or by the
   // pre-sync legacy id). Returns null when Drive has no budget.db yet.
   async function fileMeta(interactive) {
@@ -317,6 +348,26 @@
     if (fileName === 'budget.db' && !fileId) {
       const legacy = legacyFileId();
       if (legacy) fileId = legacy;
+    }
+    if (fileName === 'budget.db' && !fileId) {
+      // No tracked id (a new device, cleared storage): look the file up before
+      // creating one. findByName throws when Drive cannot answer, and that must
+      // stop the upload — posting a second budget.db because a lookup hiccuped
+      // is how several files end up in one account.
+      const existing = await findByName(true);
+      if (existing) { fileId = existing.id; setFileMeta(existing.id, existing.name); }
+      else {
+        // Same name, different name ("budget (1).db"), it is still the user's
+        // budget. Creating another file here is what duplicated their data, so
+        // refuse and send them to the picker instead of guessing.
+        const known = await listBudgetFiles();
+        if (known.length) {
+          const err = new Error('Google Drive already has your budget as "' + known[0].name +
+            '". Open Settings → Drive → "Find my budget in Drive" to use that file instead of creating a second one.');
+          err.code = 'PICK_FILE';
+          throw err;
+        }
+      }
     }
     if (fileId) {
       try {
@@ -363,6 +414,21 @@
     return await uploadBytes(bytes, name);
   }
 
+  // Read one specific file by id, for "which copy do you want to use?".
+  async function pullFile(id) {
+    const meta = await fetchFile(id);
+    if (!meta) throw new Error('That budget file is no longer in Google Drive.');
+    const res = await request(API_FILES + '/' + meta.id + '?alt=media', { method: 'GET' }, true, false);
+    const bytes = await res.arrayBuffer();
+    lsSet(K.remoteMod, meta.modifiedTime || '0');
+    lsSet(K.lastPull, String(Date.now()));
+    return { bytes: bytes, modifiedTime: meta.modifiedTime || null, fileName: meta.name || '' };
+  }
+
+  // Point this browser at a file the user picked, so later saves update it
+  // instead of creating another one.
+  function setFile(id, name) { setFileMeta(id, name || 'budget.db'); }
+
   // Rolling backups: list the app's budget-backup-*.db files (newest first)
   // and delete old ones. drive.file scope reaches files the app created.
   async function listBackups() {
@@ -381,7 +447,7 @@
     return await request(API_FILES + '/' + id, { method: 'DELETE' }, false, false);
   }
 
-  function lastRemoteModified() { return Number(lsGet(K.remoteMod) || 0); }
+  function lastRemoteModified() { return msOf(lsGet(K.remoteMod)); }
   function lastPushAt() { return Number(lsGet(K.lastPush) || 0); }
   function lastPullAt() { return Number(lsGet(K.lastPull) || 0); }
   function localUploaded() { return lsGet(K.uploaded) === '1'; }
@@ -447,6 +513,9 @@
     fileMeta: fileMeta,
     push: push,
     pull: pull,
+    pullFile: pullFile,
+    listBudgetFiles: listBudgetFiles,
+    setFile: setFile,
     uploadBackup: uploadBackup,
     listBackups: listBackups,
     deleteFile: deleteFile,

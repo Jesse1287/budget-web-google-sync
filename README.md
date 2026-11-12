@@ -8,6 +8,7 @@ Zero-based envelope budgeting PWA.
 - Near-real-time sync: while open, the app polls Drive every few seconds so other signed-in devices pick up changes in seconds.
 - Browser storage (IndexedDB) is a fast local cache so the app still opens before Drive is reachable; it never holds the only copy.
 - One-time migration: an existing local budget is uploaded to Drive on first sign-in (it is never silently overwritten).
+- **One budget, many devices:** on sign-in the app looks for the existing file before it ever creates one. If Drive holds several budget files (the app used to add one per device), it stops and asks which file is yours instead of picking the newest; **Settings → Drive → Find my budget in Drive** does the same at any time. A failed lookup is reported as a sync error rather than turned into a second `budget.db`.
 - Import/export of `budget.db` files, including **Settings → Data → Import .db**: picks a file made by an older copy of the app (or another Google account), checks it read-only, copies the current budget to Drive as a backup, then replaces the budget everywhere and pushes it.
 - Built-in **Help** tab: a plain-language setup guide (categories → checks → today's balance) plus everyday use, periods, and sync.
 - Safety nets: **Undo** after a delete, a daily rolling backup in Drive (last 7 kept), a local `.db` copy when a period closes, and a conflict prompt when two devices change the budget at the same time.
@@ -34,6 +35,8 @@ Users sign in with their own Google account on first launch; no IDs or scopes to
 - Scopes: `drive.file`, `userinfo.email`, `userinfo.profile`.
 
 The client ID is bundled in `drive.js`. Sign-in uses **Google Identity Services' OAuth 2.0 token model** (`initTokenClient`): a popup returns a short-lived access token (~1 hour) straight to the page, so there is **no client secret and no backend**. The token is renewed silently from the Google session already in the browser (on the next tap after it ages out, or when the app returns to the foreground); when Google requires interaction the app shows a **Sign in with Google** button. Consequently there is no long-lived refresh token: a device that stays closed for a long time needs one tap to reconnect, and popups must be allowed for the site.
+
+**Finding the budget, not creating one.** `drive.file` only exposes files this app created, so `drive.js` searches by name and by a listing of `*.db` files, and remembers the chosen file id in `localStorage` (`budget.gsync.file_id`). An upload with no remembered id asks Drive first; if Drive cannot answer the upload fails (visible sync error) instead of posting a new file, and if the budget exists under another name the push refuses with a "pick your file" message. Drive timestamps are RFC3339 strings, so they are parsed with `msOf()` — never `Number()`, which yields `NaN` for a date and used to make every "is Drive newer?" comparison false.
 
 ## Files
 - `index.html` — UI
