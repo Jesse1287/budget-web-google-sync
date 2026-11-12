@@ -65,6 +65,7 @@ body { background-color: #f8f9fa; }
 </div>
 
 <input type="file" id="file-input" accept=".db,.sqlite,.sqlite3,application/octet-stream" class="d-none">
+<input type="file" id="import-input" accept=".db,.sqlite,.sqlite3,application/octet-stream" class="d-none">
 
 <div id="app" class="container-fluid py-3 d-none" style="max-width:1200px">
   <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -294,14 +295,16 @@ body { background-color: #f8f9fa; }
         <div class="card h-100">
           <div class="card-body">
             <h5>Data</h5>
-            <p class="text-muted small">Google Drive is the durable copy; this browser keeps a fast local cache so the app works even before Drive is reachable. Downloading gives a point-in-time <code>.db</code> copy.</p>
+            <p class="text-muted small">Google Drive is the durable copy; this browser keeps a fast local cache so the app works even before Drive is reachable. Downloading gives a point-in-time <code>.db</code> copy; importing replaces the budget on all your devices with a file you pick.</p>
             <div class="d-flex gap-2 flex-wrap">
               <button id="data-save2" class="btn btn-outline-secondary btn-sm">Save now</button>
               <button id="data-reload2" class="btn btn-outline-secondary btn-sm">Reload saved</button>
               <button id="data-download2" class="btn btn-outline-secondary btn-sm">Download .db</button>
+              <button id="data-import2" class="btn btn-outline-primary btn-sm">Import .db</button>
               <button id="data-new" class="btn btn-outline-danger btn-sm">Start fresh</button>
             </div>
-            <p class="small text-muted mt-2 mb-0">App version 13</p>
+            <p class="small text-muted mt-2 mb-0">Import is for a <code>budget.db</code> from another copy of this app — an older version, or a different Google account. The file is checked first, the budget you have now is copied to Google Drive, and only then is it replaced.</p>
+            <p class="small text-muted mt-1 mb-0">App version 14</p>
           </div>
         </div>
       </div>
@@ -395,6 +398,7 @@ body { background-color: #f8f9fa; }
           <li>The app also saves a copy of your budget in Google Drive once a day (the last 7 are kept), and gives you a file copy when you start a new period.</li>
           <li>To fix a mistake, use the buttons on the transaction row: change the category, split it, edit it, or delete it.</li>
           <li><strong>Settings → Data → Download .db</strong> saves a copy of your budget on your device. <strong>Start fresh</strong> makes a new empty budget for every device; it uploads a backup of the old one first.</li>
+          <li><strong>Coming from an older copy of this app?</strong> If your old budget does not show up here, open <strong>Settings → Data → Import .db</strong> and pick its <code>budget.db</code> file (download it from Google Drive first if that is where it is). The file is checked before anything is replaced, and the budget you have now is copied to Google Drive first.</li>
         </ul>
       </div>
     </div>
@@ -462,8 +466,8 @@ body { background-color: #f8f9fa; }
 <script>window.SQLJS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-<script src="backend.js?v=13"></script>
-<script src="drive.js?v=13"></script>
-<script src="app.js?v=13"></script>
+<script src="backend.js?v=14"></script>
+<script src="drive.js?v=14"></script>
+<script src="app.js?v=14"></script>
 </body>
 </html>

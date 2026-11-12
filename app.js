@@ -1204,6 +1204,83 @@ async function openFile(file) {
   } catch (e) { landStatus(e.message, 'text-danger'); }
 }
 
+// Settings → Data → Import .db. Brings in a budget file from another copy of the
+// app — including one this app cannot see in Drive, because a different version
+// (or a different Google project) created it. The file is opened and checked
+// read-only first, the budget in use is copied to Drive, and only then is it
+// replaced, so a wrong file cannot cost anyone their data.
+async function importBudgetFile(file) {
+  let bytes;
+  try { bytes = new Uint8Array(await file.arrayBuffer()); }
+  catch (e) { alert('Could not read that file: ' + e.message); return; }
+
+  let info;
+  try { info = Backend.inspectBinary(bytes); }
+  catch (e) { info = { ok: false, reason: e.message }; }
+  if (!info || !info.ok) {
+    alert("That file can't be imported.\n\n" + (info && info.reason ? info.reason : 'Unknown problem.'));
+    return;
+  }
+
+  const parts = [
+    info.transactions + (info.transactions === 1 ? ' transaction' : ' transactions')
+  ];
+  if (info.paychecks) parts.push(info.paychecks + (info.paychecks === 1 ? ' saved check' : ' saved checks'));
+  parts.push(info.categories ? info.categories + (info.categories === 1 ? ' category' : ' categories') : 'no category list');
+
+  const msg = 'This file has ' + parts.join(', ') + '.\n\n' +
+    (info.categories ? '' :
+      'It has no saved category list of its own — the older server version kept categories in config.json. Your transactions still show under the right category names, but add your categories on the Categories tab so they appear in the menus and settings.\n\n') +
+    'Replace the budget on ALL your devices with this file? A copy of the budget you have now is saved to Google Drive first.';
+  if (!confirm(msg)) return;
+
+  cancelDriveSync();
+  let before = null;
+  try { before = Backend.exportBinary(); } catch (e) {}
+  try { await saveNow(); } catch (e) {}
+  setSettingsStatus('Importing…');
+
+  // Safety copy of what is open now, before anything is replaced.
+  if (before && Drive.hasRefresh()) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    try {
+      await Drive.uploadBackup('budget-backup-' + stamp + '.db', before);
+    } catch (e) {
+      if (!confirm('The Google Drive safety copy failed: ' + e.message + '\n\nImport anyway?')) {
+        setSettingsStatus('Import cancelled — nothing was changed.');
+        return;
+      }
+    }
+  }
+
+  try {
+    await Backend.loadFromBinary(bytes);
+  } catch (e) {
+    if (before) { try { await Backend.loadFromBinary(before); } catch (e2) {} }
+    setSettingsStatus('Import failed — nothing was changed: ' + e.message, 'text-danger');
+    return;
+  }
+
+  dataName = 'budget.db';
+  await saveNow();
+  await enterApp();
+
+  // An explicit replace: record Drive's current timestamp so the sync below
+  // uploads this file instead of raising the "another device wrote" banner.
+  if (Drive.hasRefresh()) {
+    setSettingsStatus('Imported — uploading to Google Drive…');
+    try {
+      let meta = null;
+      try { meta = await Drive.fileMeta(false); } catch (e) { if (e.code === 'NOT_SIGNED_IN') throw e; }
+      if (meta) lastKnownRemoteMod = Number(meta.modifiedTime) || 0;
+      await runDriveSync();
+    } catch (e) { scheduleDriveSync(); }
+  }
+
+  setSettingsStatus('Imported ' + parts.join(', ') + '.', 'text-success');
+  if (!info.categories) showTab('categories');
+}
+
 async function newBudget() {
   if (!confirm('Replace your budget on ALL devices with a fresh empty one? A point-in-time copy is kept in Google Drive first.')) return;
   cancelDriveSync();
@@ -1605,6 +1682,12 @@ $('sync-signin').addEventListener('click', async () => {
 $('data-save2').addEventListener('click', () => saveNow().catch(e => alert(e.message)));
 $('data-reload2').addEventListener('click', reloadSaved);
 $('data-download2').addEventListener('click', downloadBackend);
+$('data-import2').addEventListener('click', () => $('import-input').click());
+$('import-input').addEventListener('change', e => {
+  const file = e.target.files[0];
+  e.target.value = ''; // picking the same file twice must still fire
+  if (file) importBudgetFile(file).catch(err => setSettingsStatus(err.message, 'text-danger'));
+});
 $('data-new').addEventListener('click', newBudget);
 
 $('conflict-keep-mine').addEventListener('click', resolveConflictKeepMine);
@@ -1631,7 +1714,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=13', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=14', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };

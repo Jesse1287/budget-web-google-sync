@@ -4,13 +4,13 @@ Zero-based envelope budgeting PWA. **No backend**: Google Drive holds the durabl
 
 ## Stack
 
-Plain JS, no bundler. `index.html` loads bootstrap@5.3.0 + sql.js@1.10.3 from the jsDelivr CDN, then `backend.js` → `drive.js` → `app.js` (all with `?v=13` cache-busting). `drive.js` lazily loads `https://accounts.google.com/gsi/client` itself, so there is no extra script tag to manage.
+Plain JS, no bundler. `index.html` loads bootstrap@5.3.0 + sql.js@1.10.3 from the jsDelivr CDN, then `backend.js` → `drive.js` → `app.js` (all with `?v=14` cache-busting). `drive.js` lazily loads `https://accounts.google.com/gsi/client` itself, so there is no extra script tag to manage.
 
 - `index.html` — UI (Bootstrap 5)
 - `app.js` — frontend behavior + two-way Drive sync orchestration
 - `backend.js` — SQL.js (WASM SQLite) data layer; `budget.db` is a plain SQLite file
 - `drive.js` — Google sign-in (Google Identity Services token model) and Drive sync
-- `manifest.json` / `sw.js` — PWA; service-worker cache is named `roux-budget-web-v13`
+- `manifest.json` / `sw.js` — PWA; service-worker cache is named `roux-budget-web-v14`
 - `icons/` — PWA icons
 - `reference/` — **gitignored**, local-only copy of the old Flask/Docker version, kept for reference; never deployed
 

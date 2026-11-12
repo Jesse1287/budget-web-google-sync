@@ -8,7 +8,7 @@ Zero-based envelope budgeting PWA.
 - Near-real-time sync: while open, the app polls Drive every few seconds so other signed-in devices pick up changes in seconds.
 - Browser storage (IndexedDB) is a fast local cache so the app still opens before Drive is reachable; it never holds the only copy.
 - One-time migration: an existing local budget is uploaded to Drive on first sign-in (it is never silently overwritten).
-- Import/export of `budget.db` files.
+- Import/export of `budget.db` files, including **Settings → Data → Import .db**: picks a file made by an older copy of the app (or another Google account), checks it read-only, copies the current budget to Drive as a backup, then replaces the budget everywhere and pushes it.
 - Built-in **Help** tab: a plain-language setup guide (categories → checks → today's balance) plus everyday use, periods, and sync.
 - Safety nets: **Undo** after a delete, a daily rolling backup in Drive (last 7 kept), a local `.db` copy when a period closes, and a conflict prompt when two devices change the budget at the same time.
 - Recurring paycheck and income templates.

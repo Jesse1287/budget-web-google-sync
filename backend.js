@@ -84,6 +84,47 @@ const Backend = {
 
     exportBinary() { return this.DB.export(); },
 
+    // Read-only look at a .db file the user picked (Settings → Data → Import),
+    // done on a throwaway connection so a wrong pick is rejected before the
+    // budget that is open right now is touched at all.
+    inspectBinary(bytes) {
+        const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+        if (!u8.length) return { ok: false, reason: 'That file is empty.' };
+        const head = String.fromCharCode.apply(null, Array.prototype.slice.call(u8.subarray(0, 15)));
+        if (head !== 'SQLite format 3') {
+            return { ok: false, reason: 'That file is not a database file. The one to pick is named budget.db.' };
+        }
+        let db = null;
+        try {
+            db = new this.SQL.Database(u8);
+            const tables = qAllRaw(db, "SELECT name FROM sqlite_master WHERE type='table'").map(r => r.name);
+            const has = (t) => tables.indexOf(t) >= 0;
+            if (!has('transactions') && !has('app_config')) {
+                return { ok: false, reason: 'That database has no budget data in it (no transactions and no settings).' };
+            }
+            const count = (t) => has(t) ? qAllRaw(db, 'SELECT COUNT(*) AS n FROM ' + t)[0].n : 0;
+            let categories = 0;
+            if (has('app_config')) {
+                const row = qAllRaw(db, 'SELECT data FROM app_config WHERE id=1')[0];
+                try {
+                    const c = row ? JSON.parse(row.data) : {};
+                    if (Array.isArray(c.envelopes)) categories = c.envelopes.length;
+                } catch (e) { /* unreadable settings count as no categories */ }
+            }
+            return {
+                ok: true,
+                size: u8.length,
+                transactions: count('transactions'),
+                paychecks: count('paychecks'),
+                categories: categories
+            };
+        } catch (e) {
+            return { ok: false, reason: 'That file could not be opened as a database (' + ((e && e.message) || 'unknown error') + ').' };
+        } finally {
+            if (db) { try { db.close(); } catch (e) {} }
+        }
+    },
+
     _runSchema() { this.DB.exec(SCHEMA); },
 
     _migrate() {
