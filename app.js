@@ -47,9 +47,11 @@ let undoState = null;         // DB snapshot offered as "Undo" after a delete
 let undoTimer = null;
 let dailyBackupTried = '';
 let idbPromise = null;
-let splitModal, editModal;
+let splitModal, editModal, savingsModal;
 let splitTargetId = null;
 let editTarget = null;
+let savingsData = null;
+let savingsMode = 'deposit';
 
 function openIDB() {
   if (!idbPromise) {
@@ -773,7 +775,7 @@ async function loadTransactions(reset) {
     const canSplit = !readOnly && t.type !== 'allocation' && (parent ? t.type === 'expense' : true);
     const split = canSplit ? `<button class="btn btn-outline-secondary btn-sm tx-split" data-id="${t.id}" data-desc="${esc(t.description)}" data-amt="${Math.abs(t.amount)}">Split</button>` : '';
     const edit = readOnly ? '' : `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${parent ? '' : esc(t.category)}" data-t="${t.type}" data-head="${parent ? 1 : 0}" title="Edit">✎</button>`;
-    return `<tr><td>${t.date}</td><td>${esc(t.description)}</td>${catCell}<td class="text-end ${sign}">${parent ? '<strong>' + fmt(t.amount) + '</strong>' : fmt(t.amount)}</td><td class="text-end">${edit}${split}<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" title="Delete" aria-label="Delete">×</button></td></tr>`;
+    return `<tr><td>${t.date}</td><td>${esc(t.description)}</td>${catCell}<td class="text-end ${sign}">${parent ? '<strong>' + fmt(t.amount) + '</strong>' : fmt(t.amount)}</td><td class="text-end">${edit}${split}<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" data-src="${esc(t.source)}" title="Delete" aria-label="Delete">×</button></td></tr>`;
   };
   const childHtml = k => {
     const sign = k.amount < 0 ? 'neg' : 'pos';
@@ -814,7 +816,13 @@ function wireTxBody() {
     if (!btn) return;
     try {
       if (btn.classList.contains('tx-del')) {
-        if (!confirm('Delete this transaction?')) return;
+        const src = btn.dataset.src;
+        const ask = src === 'savings'
+          ? 'Delete this move to the savings account? The account balance goes back down by that amount.'
+          : src === 'savings_withdrawal'
+            ? 'Delete this move from the savings account? The account balance goes back up by that amount.'
+            : 'Delete this transaction?';
+        if (!confirm(ask)) return;
         const snapshot = Backend.exportBinary();
         await japi('/api/transactions/' + btn.dataset.id, 'DELETE');
         offerUndo('Transaction deleted.', snapshot);
@@ -1249,6 +1257,13 @@ async function loadReport() {
   const rows = amts => amts.length
     ? amts.map(x => `<tr><td>${esc(x.category || x.name || '')}</td><td class="text-end">${fmt(x.amount)}</td></tr>`).join('')
     : '<tr><td class="text-muted" colspan="2">None.</td></tr>';
+  const sav = s.savings || { to: 0, from: 0 };
+  const savLine = (sav.to || sav.from)
+    ? `<div class="col-12"><div class="card"><div class="card-body py-2 small">
+        Savings: moved <strong>${fmt(sav.to)}</strong> to the account, <strong>${fmt(sav.from)}</strong> back to checking.
+        <span class="text-muted">Saving is not counted as spending, and money coming back is not income.</span>
+      </div></div></div>`
+    : '';
   $('report-body').innerHTML = `<div class="row g-3">
     <div class="col-md-6"><div class="card h-100"><div class="card-body">
       <h6 class="mb-1">Income received <span class="badge bg-success">${fmt(s.received)}</span></h6>
@@ -1260,7 +1275,186 @@ async function loadReport() {
       <p class="text-muted small mb-2">Net this month <span class="${s.net < 0 ? 'neg' : ''}">${fmt(s.net)}</span></p>
       <table class="table table-sm mb-0"><tbody>${rows(s.expenses)}</tbody></table>
     </div></div></div>
+    ${savLine}
   </div>`;
+}
+
+// ---- savings (bank account ledger; the Savings category is the staging box) ----
+const fmtSigned = n => (n > 0 ? '+' : n < 0 ? '−' : '') + fmt(Math.abs(Number(n) || 0));
+
+function setSavingsStatus(msg, cls) {
+  const el = $('savings-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'small d-block mt-2 ' + (cls || 'text-muted');
+}
+
+async function loadSavings() {
+  if (!categories.length) await loadCategories();
+  const s = await api('/api/savings');
+  savingsData = s;
+  $('savings-title').textContent = s.name;
+  $('savings-balance').textContent = fmt(s.balance);
+  $('savings-balance').className = 'fs-3 fw-bold mb-2' + (s.balance < 0 ? ' neg' : '');
+  $('savings-name').value = s.name;
+  $('savings-ready').textContent = s.category ? fmt(s.available) : '—';
+  $('savings-ready').className = 'badge fs-6 ' + (s.available !== null && s.available < 0 ? 'bg-danger' : 'bg-info');
+
+  const missing = !s.category || !s.category_known;
+  $('savings-cat-missing').classList.toggle('d-none', !missing);
+  $('savings-setaside-form').classList.toggle('d-none', missing);
+  $('savings-move-all').classList.add('d-none');
+  $('savings-move-hint').textContent = '';
+  if (missing) {
+    $('savings-cat-missing-msg').textContent = s.category
+      ? 'The category "' + s.category + '" is no longer in your list. Pick the category that holds money while it waits to move.'
+      : 'Pick the category that holds money while it is still in checking. "Savings" is the usual name.';
+    const list = categories.filter(c => c !== REVIEW_CAT);
+    $('savings-pick-cat').innerHTML = '<option value="">— pick a category —</option>' +
+      list.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    $('savings-create-cat').classList.toggle('d-none', list.some(c => c.toLowerCase() === 'savings'));
+  } else {
+    const fromList = categories.filter(c => c !== REVIEW_CAT && c !== s.category);
+    const keep = $('savings-from').value;
+    $('savings-from').innerHTML = fromList.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    if (fromList.includes(keep)) $('savings-from').value = keep;
+    $('savings-setaside-btn').disabled = fromList.length === 0;
+    if (s.available > 0) {
+      $('savings-move-hint').textContent = 'Ready in "' + s.category + '": ' + fmt(s.available);
+      $('savings-move-all').classList.remove('d-none');
+    } else if (s.available < 0) {
+      $('savings-move-hint').textContent = 'The category is in the red — nothing is ready to move.';
+    }
+  }
+  if (!$('savings-date').value) $('savings-date').value = localDate();
+
+  // One newest-first list: account events plus set-asides (which never touch
+  // the account, so their account cell stays a dash).
+  const rows = [];
+  (s.events || []).forEach(e => {
+    const what = e.kind === 'deposit' ? 'Moved to the account'
+      : e.kind === 'withdrawal' ? 'Moved back to checking' : 'Account adjustment';
+    rows.push({ date: e.date, what: what, note: e.note || '', account: e.amount });
+  });
+  (s.set_asides || []).forEach(t => {
+    rows.push({ date: t.date, what: 'Set aside ' + fmt(t.amount) + ' from ' + t.other, note: '', account: null });
+  });
+  rows.sort((a, b) => b.date.localeCompare(a.date));
+  $('savings-history-body').innerHTML = rows.length
+    ? rows.map(r => `<tr><td>${r.date}</td><td>${esc(r.what)}</td><td class="text-muted">${esc(r.note)}</td><td class="text-end ${r.account === null ? 'text-muted' : (r.account < 0 ? 'neg' : 'pos')}">${r.account === null ? '—' : fmt(r.account)}</td></tr>`).join('')
+    : '<tr><td colspan="4" class="text-muted small">Nothing yet. Set money aside, or move some to the account.</td></tr>';
+
+  $('savings-months').innerHTML = (s.months || []).length
+    ? s.months.map(m => `<tr><td>${m.month}</td><td class="text-end">${fmt(m.set_aside)}</td><td class="text-end">${fmt(m.to_account)}</td><td class="text-end">${fmt(m.from_account)}</td><td class="text-end ${m.change < 0 ? 'neg' : ''}">${fmtSigned(m.change)}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="text-muted small">No savings activity yet.</td></tr>';
+}
+
+function openSavingsModal(mode) {
+  if (!savingsData) return;
+  if (!savingsData.category || !savingsData.category_known) {
+    setSavingsStatus('Pick which category holds your savings first.', 'text-warning');
+    return;
+  }
+  savingsMode = mode;
+  $('savings-modal-title').textContent = { deposit: 'Move to savings account', withdraw: 'Move back to checking', adjust: 'Adjust the account balance' }[mode];
+  $('savings-modal-note').value = '';
+  $('savings-modal-date').value = localDate();
+  const amt = $('savings-modal-amount');
+  amt.value = '';
+  amt.removeAttribute('max');
+  amt.min = mode === 'adjust' ? '0' : '0.01';
+  $('savings-modal-cat-wrap').classList.toggle('d-none', mode !== 'withdraw');
+  if (mode === 'deposit') {
+    $('savings-modal-help').textContent = 'Takes money out of the "' + savingsData.category + '" category — still in checking — and adds it to the savings account. The Balance badge drops because that money has left checking.';
+    $('savings-modal-amount-label').textContent = 'Amount to move';
+    if (savingsData.available > 0) amt.value = Number(savingsData.available).toFixed(2);
+  } else if (mode === 'withdraw') {
+    $('savings-modal-help').textContent = 'Takes money out of the savings account and puts it back into a category in checking. Available in the account: ' + fmt(savingsData.balance) + '.';
+    $('savings-modal-amount-label').textContent = 'Amount to move back';
+    amt.max = String(Math.max(0, savingsData.balance));
+    $('savings-modal-cat').innerHTML = categories.filter(c => c !== REVIEW_CAT)
+      .map(c => `<option value="${esc(c)}" ${c === savingsData.category ? 'selected' : ''}>${esc(c)}</option>`).join('');
+  } else {
+    $('savings-modal-help').textContent = 'Type the balance your bank shows. Any difference is recorded as an adjustment on this page; your budget totals do not change.';
+    $('savings-modal-amount-label').textContent = 'Balance at the bank';
+    amt.value = Number(savingsData.balance).toFixed(2);
+  }
+  $('savings-modal-save').textContent = { deposit: 'Move', withdraw: 'Move back', adjust: 'Adjust' }[mode];
+  updateSavingsPreview();
+  savingsModal.show();
+}
+
+function updateSavingsPreview() {
+  const el = $('savings-modal-preview');
+  if (!el || !savingsData) return;
+  const amt = Math.round((parseFloat($('savings-modal-amount').value) || 0) * 100) / 100;
+  if (savingsMode === 'adjust') {
+    const diff = Math.round((amt - savingsData.balance) * 100) / 100;
+    if (Math.abs(diff) < 0.005) {
+      el.textContent = 'That is already the balance on record — nothing to adjust.';
+      el.className = 'small text-muted';
+    } else {
+      el.textContent = 'Account: ' + fmt(savingsData.balance) + ' → ' + fmt(amt) + ' (' + fmtSigned(diff) + ' adjustment). Budget totals do not change.';
+      el.className = 'small text-info';
+    }
+    return;
+  }
+  if (!(amt > 0)) { el.textContent = 'Enter an amount.'; el.className = 'small text-muted'; return; }
+  if (savingsMode === 'deposit') {
+    const ready = savingsData.available === null ? 0 : savingsData.available;
+    const afterCat = Math.round((ready - amt) * 100) / 100;
+    const red = afterCat < 0;
+    el.innerHTML = 'Account ' + fmt(savingsData.balance) + ' → ' + fmt(savingsData.balance + amt) +
+      ' · "' + esc(savingsData.category) + '" ' + fmt(ready) + ' → ' + fmt(afterCat) +
+      (red ? '<br><strong>That is more than is set aside — the category goes into the red.</strong>' : '');
+    el.className = 'small ' + (red ? 'text-danger' : 'text-success');
+  } else {
+    const after = Math.round((savingsData.balance - amt) * 100) / 100;
+    const red = after < 0;
+    el.innerHTML = 'Account ' + fmt(savingsData.balance) + ' → ' + fmt(after) +
+      (red ? '<br><strong>That is more than the account holds.</strong>' : '');
+    el.className = 'small ' + (red ? 'text-danger' : 'text-success');
+  }
+}
+
+async function saveSavingsModal() {
+  const amt = Math.round((parseFloat($('savings-modal-amount').value) || 0) * 100) / 100;
+  const date = $('savings-modal-date').value;
+  const note = $('savings-modal-note').value.trim();
+  const preview = $('savings-modal-preview');
+  const fail = msg => { preview.textContent = msg; preview.className = 'small text-danger'; };
+  if (!date) return fail('Pick a date.');
+  const snapshot = Backend.exportBinary();
+  $('savings-modal-save').disabled = true;
+  try {
+    let msg;
+    if (savingsMode === 'deposit') {
+      if (!(amt > 0)) throw new Error('Enter an amount greater than zero.');
+      await japi('/api/savings/deposit', 'POST', { amount: amt, date, note });
+      msg = 'Moved ' + fmt(amt) + ' to ' + (savingsData ? savingsData.name : 'the savings account') + '.';
+    } else if (savingsMode === 'withdraw') {
+      if (!(amt > 0)) throw new Error('Enter an amount greater than zero.');
+      const cat = $('savings-modal-cat').value;
+      await japi('/api/savings/withdraw', 'POST', { amount: amt, date, note, category: cat });
+      msg = 'Moved ' + fmt(amt) + ' back to ' + cat + '.';
+    } else {
+      const r = await japi('/api/savings/adjust', 'POST', { balance: amt, date, note });
+      if (!r.changed) {
+        savingsModal.hide();
+        setSavingsStatus('That is already the balance on record — nothing to adjust.', 'text-muted');
+        return;
+      }
+      msg = 'Account adjusted to ' + fmt(r.accounts.balance) + '.';
+    }
+    savingsModal.hide();
+    offerUndo(msg, snapshot);
+    setSavingsStatus(msg, 'text-success');
+    await refreshApp();
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    $('savings-modal-save').disabled = false;
+  }
 }
 
 function renderEnvChips() {
@@ -1296,6 +1490,7 @@ async function refreshApp() {
   await loadSummary();
   await loadIncomeChecks();
   if (!$('tab-transactions').classList.contains('d-none')) await loadTransactions(true);
+  if (!$('tab-savings').classList.contains('d-none')) await loadSavings();
   if (!$('tab-paychecks').classList.contains('d-none')) await loadPaychecks();
   if (!$('tab-report').classList.contains('d-none') && $('report-month').value) await loadReport();
   if (!$('tab-settings').classList.contains('d-none')) await loadSettings();
@@ -1529,6 +1724,7 @@ async function saveEnvelopes() {
 
 splitModal = new bootstrap.Modal($('split-modal'));
 editModal = new bootstrap.Modal($('edit-modal'));
+savingsModal = new bootstrap.Modal($('savings-modal'));
 
 $('add-date').value = localDate();
 $('close-date').value = localDate();
@@ -1540,13 +1736,14 @@ document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
     e.preventDefault();
     document.querySelectorAll('.nav-tabs .nav-link').forEach(x => x.classList.remove('active'));
     a.classList.add('active');
-    ['categories', 'transactions', 'review', 'paychecks', 'report', 'settings', 'help'].forEach(t => {
+    ['categories', 'transactions', 'savings', 'review', 'paychecks', 'report', 'settings', 'help'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('d-none', t !== a.dataset.tab);
     });
     $('add-panel').classList.toggle('d-none', a.dataset.tab !== 'transactions');
     try {
       if (a.dataset.tab === 'transactions') { await loadTransactions(true); await loadIncomeChecks(); }
+      if (a.dataset.tab === 'savings') await loadSavings();
       if (a.dataset.tab === 'paychecks') { await loadPaychecks(); await loadIncomeChecks(); }
       if (a.dataset.tab === 'review') await loadReview();
       if (a.dataset.tab === 'report') { if ($('report-month').value) await loadReport(); }
@@ -1746,6 +1943,73 @@ $('transfer-form').addEventListener('submit', async e => {
     status.className = 'small text-success';
     await refreshApp();
     updateTransferPreview();
+  } catch (err) {
+    fail(err.message);
+  }
+});
+
+// ---- savings tab wiring ----
+$('savings-deposit-btn').addEventListener('click', () => openSavingsModal('deposit'));
+$('savings-withdraw-btn').addEventListener('click', () => openSavingsModal('withdraw'));
+$('savings-adjust-btn').addEventListener('click', () => openSavingsModal('adjust'));
+$('savings-move-all').addEventListener('click', () => openSavingsModal('deposit'));
+$('savings-modal-amount').addEventListener('input', updateSavingsPreview);
+$('savings-modal-save').addEventListener('click', saveSavingsModal);
+
+$('savings-name-save').addEventListener('click', async () => {
+  try {
+    await japi('/api/savings', 'PATCH', { name: $('savings-name').value });
+    setSavingsStatus('Account name saved.', 'text-success');
+    await refreshApp();
+  } catch (e) { setSavingsStatus(e.message, 'text-danger'); }
+});
+
+$('savings-pick-cat').addEventListener('change', async () => {
+  const v = $('savings-pick-cat').value;
+  if (!v) return;
+  try {
+    await japi('/api/savings', 'PATCH', { category: v });
+    setSavingsStatus('"' + v + '" now holds money until it moves to the account.', 'text-success');
+    await refreshApp();
+  } catch (e) { setSavingsStatus(e.message, 'text-danger'); }
+});
+
+$('savings-create-cat').addEventListener('click', async () => {
+  try {
+    const cfg = await api('/api/config');
+    const envs = (cfg.envelopes || []).slice();
+    if (!envs.some(x => x.toLowerCase() === 'savings')) envs.push('Savings');
+    await japi('/api/config', 'POST', { envelopes: envs });
+    await japi('/api/savings', 'PATCH', { category: 'Savings' });
+    await loadCategories(true);
+    setSavingsStatus('Created the "Savings" category.', 'text-success');
+    await refreshApp();
+  } catch (e) { setSavingsStatus(e.message, 'text-danger'); }
+});
+
+$('savings-setaside-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const status = $('savings-setaside-status');
+  const fail = msg => { status.textContent = msg; status.className = 'small text-danger'; };
+  const from = $('savings-from').value;
+  const amount = Math.round((parseFloat($('savings-amount').value) || 0) * 100) / 100;
+  const date = $('savings-date').value;
+  const note = $('savings-note').value.trim();
+  if (!savingsData || !savingsData.category) return fail('Pick which category holds your savings first.');
+  if (!from) return fail('Pick the category the money comes from.');
+  if (!(amount > 0)) return fail('Enter an amount greater than zero.');
+  if (!date) return fail('Pick a date.');
+  const snapshot = Backend.exportBinary();
+  status.textContent = 'Moving…';
+  status.className = 'small text-muted';
+  try {
+    await japi('/api/transfers', 'POST', { from: from, to: savingsData.category, amount: amount, date: date, note: note });
+    offerUndo('Set aside ' + fmt(amount) + ' for savings.', snapshot);
+    $('savings-amount').value = '';
+    $('savings-note').value = '';
+    status.textContent = 'Set aside — still in checking, ready to move.';
+    status.className = 'small text-success';
+    await refreshApp();
   } catch (err) {
     fail(err.message);
   }

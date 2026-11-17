@@ -38,6 +38,15 @@ CREATE TABLE IF NOT EXISTS app_config (
     data TEXT NOT NULL,
     updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS savings_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('deposit', 'withdrawal', 'adjust')),
+    amount REAL NOT NULL,
+    note TEXT,
+    tx_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_txn_cat ON transactions(category);
 CREATE INDEX IF NOT EXISTS idx_txn_dedup ON transactions(date, description, amount, category, type, source);
@@ -129,11 +138,12 @@ const Backend = {
 
     _migrate() {
         this.DB.run('PRAGMA foreign_keys = ON;');
-        // ensure app_config exists (older DBs predate it)
-        const has = qAllRaw(this.DB, "SELECT name FROM sqlite_master WHERE type='table' AND name='app_config'");
-        if (!has.length) {
-            this._runSchema();
-        }
+        // Every statement is CREATE ... IF NOT EXISTS, so running the whole
+        // schema is a no-op on a current file and the only way an older Drive
+        // copy ever gains a table added by a newer version (savings_events,
+        // credit cards). Never drop or rename anything here: old and new
+        // devices must be able to share one budget.db during a release.
+        this._runSchema();
         this._ensureConfig();
         // one-time repair: split parts under an income parent must be 'allocation',
         // not 'income' (mirrors _init_db in app.py)
@@ -168,13 +178,21 @@ const Backend = {
             envelopes: Array.isArray(c.envelopes) ? c.envelopes : [],
             review_category: c.review_category || DEFAULT_REVIEW,
             keywords: c.keywords && typeof c.keywords === 'object' ? c.keywords : {},
+            savings_category: typeof c.savings_category === 'string' ? c.savings_category : '',
+            savings_account_name: c.savings_account_name || 'Savings account',
         };
     },
     saveCfg(c) {
+        // Callers pass only the parts they are changing; the rest come from the
+        // stored config so a category rename cannot silently forget the savings
+        // pointer or the account name.
+        const cur = this.cfg();
         const data = {
-            envelopes: c.envelopes || [],
-            review_category: c.review_category || DEFAULT_REVIEW,
-            keywords: c.keywords || {},
+            envelopes: c.envelopes !== undefined ? c.envelopes : cur.envelopes,
+            review_category: c.review_category || cur.review_category || DEFAULT_REVIEW,
+            keywords: c.keywords !== undefined ? c.keywords : cur.keywords,
+            savings_category: c.savings_category !== undefined ? c.savings_category : cur.savings_category,
+            savings_account_name: c.savings_account_name !== undefined ? c.savings_account_name : cur.savings_account_name,
         };
         this.run('INSERT OR REPLACE INTO app_config (id, data, updated_at) VALUES (1, ?, ?)',
             [JSON.stringify(data), nowISO()]);
@@ -298,14 +316,24 @@ const Backend = {
         this.qAll("SELECT description, amount FROM transactions WHERE type='income' AND date LIKE ?", [prefix])
             .forEach(r => setIn(r.description, r.amount, 'Income'));
         this.qAll("SELECT description, SUM(amount) AS t FROM transactions WHERE type='allocation' AND parent_id IS NULL " +
-            "AND source != 'carryover' AND source != 'transfer' AND date LIKE ? GROUP BY lower(description), description", [prefix])
+            "AND source != 'carryover' AND source != 'transfer' AND source != 'savings_withdrawal' AND date LIKE ? " +
+            "GROUP BY lower(description), description", [prefix])
             .forEach(r => setIn(r.description, r.t, 'Allocation'));
 
         const expenseRows = this.qAll(
             "SELECT category, SUM(-amount) AS t FROM transactions WHERE type='expense' AND date LIKE ? " +
+            "AND source != 'savings' " +
             "AND id NOT IN (SELECT DISTINCT parent_id FROM transactions WHERE parent_id IS NOT NULL) " +
             "GROUP BY category ORDER BY t DESC", [prefix])
             .map(r => ({ category: r.category, amount: round2(r.t) }));
+
+        // Money moved to the bank savings account left checking, but it is not
+        // "spending" and coming back is not "income" — show both as their own
+        // line so the month still adds up without pretending to have spent it.
+        const savingsTo = this.q1("SELECT COALESCE(SUM(-amount),0) AS t FROM transactions " +
+            "WHERE type='expense' AND source='savings' AND date LIKE ?", [prefix]).t;
+        const savingsFrom = this.q1("SELECT COALESCE(SUM(amount),0) AS t FROM transactions " +
+            "WHERE type='allocation' AND source='savings_withdrawal' AND date LIKE ?", [prefix]).t;
 
         let received = 0, spent = 0;
         Object.values(incomeDetail).forEach(v => received += v.amount);
@@ -318,8 +346,148 @@ const Backend = {
             income_detail: Object.values(incomeDetail).sort((a, b) => b.amount - a.amount),
             spent,
             expenses: expenseRows,
+            savings: { to: round2(savingsTo), from: round2(savingsFrom) },
             net: round2(received - spent),
         };
+    },
+
+    // ---- savings account (outside the checking budget) ----
+    // The page's balance is the money at the bank, derived from its own event
+    // log. The Savings *category* is the staging envelope in checking: it holds
+    // money until it is actually moved, at which point the category is debited.
+    savings() {
+        const c = this.cfg();
+        const category = c.savings_category || '';
+        const known = Boolean(category) && this.categories().includes(category);
+        const balance = this.q1('SELECT COALESCE(SUM(amount),0) AS t FROM savings_events').t;
+        let available = null;
+        if (known) {
+            const allocated = this.q1("SELECT COALESCE(SUM(amount),0) AS t FROM transactions " +
+                "WHERE type='allocation' AND category=?", [category]).t;
+            const spent = this.q1("SELECT COALESCE(SUM(-amount),0) AS t FROM transactions WHERE type='expense' AND category=? " +
+                "AND id NOT IN (SELECT DISTINCT parent_id FROM transactions WHERE parent_id IS NOT NULL)", [category]).t;
+            available = round2(allocated - spent);
+        }
+        const events = this.qAll('SELECT * FROM savings_events ORDER BY date DESC, id DESC LIMIT 200')
+            .map(e => ({ id: e.id, date: e.date, kind: e.kind, amount: round2(e.amount), note: e.note || '', tx_id: e.tx_id }));
+        let setAsides = [];
+        if (category) {
+            setAsides = this.qAll(
+                "SELECT p.date AS date, mine.amount AS amount, " +
+                "  (SELECT other.category FROM transactions other WHERE other.parent_id=p.id AND other.category != ?) AS other " +
+                "FROM transactions p JOIN transactions mine ON mine.parent_id=p.id " +
+                "WHERE p.source='transfer' AND p.parent_id IS NULL AND mine.category=? " +
+                "ORDER BY p.date DESC, p.id DESC LIMIT 100", [category, category])
+                .map(r => ({ date: r.date, amount: round2(r.amount), other: r.other || '—' }));
+        }
+        return {
+            name: c.savings_account_name || 'Savings account',
+            category: category,
+            category_known: known,
+            balance: round2(balance),
+            available: available,
+            events: events,
+            set_asides: setAsides,
+            months: this._savingsMonths(category),
+        };
+    },
+
+    _savingsMonths(category) {
+        const map = {};
+        const row = month => {
+            if (!map[month]) map[month] = { month: month, set_aside: 0, to_account: 0, from_account: 0, change: 0 };
+            return map[month];
+        };
+        this.qAll("SELECT substr(date,1,7) AS month, kind, SUM(amount) AS t FROM savings_events " +
+            "GROUP BY substr(date,1,7), kind").forEach(r => {
+            const m = row(r.month);
+            if (r.kind === 'deposit') m.to_account = round2(r.t);
+            else if (r.kind === 'withdrawal') m.from_account = round2(-r.t);
+            m.change = round2(m.change + r.t);
+        });
+        if (category) {
+            this.qAll("SELECT substr(t.date,1,7) AS month, SUM(t.amount) AS t FROM transactions t " +
+                "JOIN transactions p ON p.id=t.parent_id " +
+                "WHERE p.source='transfer' AND t.category=? GROUP BY substr(t.date,1,7)", [category])
+                .forEach(r => { row(r.month).set_aside = round2(r.t); });
+        }
+        return Object.values(map).sort((a, b) => b.month.localeCompare(a.month)).slice(0, 6);
+    },
+
+    _savingsPatch(d) {
+        const c = this.cfg();
+        let category = c.savings_category;
+        if (d.category !== undefined) {
+            category = String(d.category || '').trim();
+            if (category && !this.categories().includes(category)) throw new Error('"' + category + '" is not a category any more');
+            if (category.toLowerCase() === c.review_category.toLowerCase()) throw new Error('the review category cannot hold savings');
+        }
+        let name = c.savings_account_name;
+        if (d.name !== undefined) {
+            name = String(d.name || '').trim() || 'Savings account';
+        }
+        this.saveCfg({ savings_category: category, savings_account_name: name });
+        return { name: name, category: category };
+    },
+
+    _savingsDeposit(d) {
+        const c = this.cfg();
+        const category = c.savings_category;
+        if (!category) throw new Error('pick which category holds your savings first');
+        const amount = round2(parseFloat(d.amount));
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount must be greater than zero');
+        const date = this._dateField(d.date);
+        const note = String(d.note || '').trim();
+        this.run('INSERT INTO transactions (date, description, amount, category, type, source) VALUES (?,?,?,?,?,?)',
+            [date, 'Move to savings account' + (note ? ' — ' + note : ''), -amount, category, 'expense', 'savings']);
+        const txId = this.lastInsertId();
+        this.run('INSERT INTO savings_events (date, kind, amount, note, tx_id) VALUES (?,?,?,?,?)',
+            [date, 'deposit', amount, note || null, txId]);
+        return { txId: txId, accounts: this.savings() };
+    },
+
+    _savingsWithdraw(d) {
+        const c = this.cfg();
+        const amount = round2(parseFloat(d.amount));
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount must be greater than zero');
+        const date = this._dateField(d.date);
+        const note = String(d.note || '').trim();
+        const balance = round2(this.q1('SELECT COALESCE(SUM(amount),0) AS t FROM savings_events').t);
+        if (amount > balance + 0.005) {
+            throw new Error('the savings account only has $' + balance.toFixed(2) + ' in it');
+        }
+        const category = String(d.category || c.savings_category || '').trim();
+        if (!category) throw new Error('pick the category the money goes back into');
+        if (!this.categories().includes(category)) throw new Error('"' + category + '" is not a category any more');
+        if (category.toLowerCase() === c.review_category.toLowerCase()) throw new Error('the review category cannot receive savings');
+        this.run('INSERT INTO transactions (date, description, amount, category, type, source) VALUES (?,?,?,?,?,?)',
+            [date, 'From savings account' + (note ? ' — ' + note : ''), amount, category, 'allocation', 'savings_withdrawal']);
+        const txId = this.lastInsertId();
+        this.run('INSERT INTO savings_events (date, kind, amount, note, tx_id) VALUES (?,?,?,?,?)',
+            [date, 'withdrawal', -amount, note || null, txId]);
+        return { txId: txId, accounts: this.savings() };
+    },
+
+    // Reconciling with the bank: the account is outside the budget, so the
+    // difference is recorded on the account only. No transaction is created.
+    _savingsAdjust(d) {
+        const target = round2(parseFloat(d.balance));
+        if (!Number.isFinite(target)) throw new Error('balance must be a number');
+        if (target < 0) throw new Error('a savings account balance cannot be negative');
+        const date = this._dateField(d.date);
+        const note = String(d.note || '').trim();
+        const current = round2(this.q1('SELECT COALESCE(SUM(amount),0) AS t FROM savings_events').t);
+        const diff = round2(target - current);
+        if (Math.abs(diff) < 0.005) return { changed: false, balance: current, accounts: this.savings() };
+        this.run('INSERT INTO savings_events (date, kind, amount, note, tx_id) VALUES (?,?,?,?,?)',
+            [date, 'adjust', diff, note || null, null]);
+        return { changed: true, diff: diff, accounts: this.savings() };
+    },
+
+    _dateField(v) {
+        const date = String(v || '').trim();
+        if (date.length !== 10 || date.charAt(4) !== '-' || date.charAt(7) !== '-') throw new Error('date must be YYYY-MM-DD');
+        return date;
     },
 
     paychecks() {
@@ -388,6 +556,7 @@ const Backend = {
             else if (route === 'hints') result = this.hints();
             else if (route === 'report') result = this.report(query.month || '');
             else if (route === 'paychecks') result = this.paychecks();
+            else if (route === 'savings') result = this.savings();
             else if (route === 'config') result = this.cfg();
             else if (seg[0] === 'transactions' && seg[2] === 'parts') result = this.transactionParts(parseInt(seg[1], 10));
             else throw new Error('unknown route: ' + route);
@@ -397,6 +566,9 @@ const Backend = {
             else if (route === 'transfers') result = this._addTransfer(body);
             else if (route === 'period/close') result = this._closePeriod(body);
             else if (route === 'paychecks') result = this._createPaycheck(body);
+            else if (route === 'savings/deposit') result = this._savingsDeposit(body);
+            else if (route === 'savings/withdraw') result = this._savingsWithdraw(body);
+            else if (route === 'savings/adjust') result = this._savingsAdjust(body);
             else if (seg[0] === 'transactions' && seg[2] === 'split') result = this._splitTransaction(parseInt(seg[1], 10), body);
             else if (seg[0] === 'categories' && seg[1] === 'merge') result = this._mergeCategory(body.from, body.to);
             else if (seg[0] === 'categories' && seg[1] === 'from-data') result = this._seedCategoriesFromData();
@@ -406,6 +578,7 @@ const Backend = {
         } else if (method === 'PATCH') {
             if (seg[0] === 'transactions') result = this._updateTransaction(parseInt(seg[1], 10), body);
             else if (seg[0] === 'paychecks') result = this._updatePaycheck(parseInt(seg[1], 10), body);
+            else if (route === 'savings') result = this._savingsPatch(body);
             else throw new Error('unknown route: ' + route);
             this._dirty();
         } else if (method === 'DELETE') {
@@ -517,7 +690,14 @@ const Backend = {
     },
 
     _deleteTransaction(id) {
-        const row = this.q1('SELECT parent_id FROM transactions WHERE id=?', [id]);
+        const row = this.q1('SELECT * FROM transactions WHERE id=?', [id]);
+        // A savings deposit/withdrawal owns an account event. Delete the event
+        // with the transaction, so the account moves back the same amount and
+        // the two never disagree. (The ledger deliberately has no FK: period
+        // close wipes transactions but the account history must survive.)
+        if (row && !row.parent_id && (row.source === 'savings' || row.source === 'savings_withdrawal')) {
+            this.run('DELETE FROM savings_events WHERE tx_id=?', [id]);
+        }
         this.run('DELETE FROM transactions WHERE parent_id=?', [id]);
         this.run('DELETE FROM transactions WHERE id=?', [id]);
         if (row && row.parent_id) {
@@ -790,10 +970,16 @@ const Backend = {
         const keywords = Object.assign({}, cur.keywords);
         Object.keys(keywords).forEach(k => { if (keywords[k] === src) keywords[k] = dst; });
 
+        // The savings page points at one category. If that category was just
+        // merged away, the pointer follows its money rather than dangling.
+        const savingsCategory = cur.savings_category && cur.savings_category === src ? dst : cur.savings_category;
+
         this.saveCfg({
             envelopes: envelopes,
             review_category: cur.review_category,
-            keywords: keywords
+            keywords: keywords,
+            savings_category: savingsCategory,
+            savings_account_name: cur.savings_account_name
         });
         this._dirty();
         return { from: src, to: dst, transactions: transactions, allocations: allocations };
@@ -805,6 +991,8 @@ const Backend = {
             envelopes: body.envelopes !== undefined ? body.envelopes : cur.envelopes,
             review_category: body.review_category !== undefined ? body.review_category : cur.review_category,
             keywords: body.keywords !== undefined ? body.keywords : cur.keywords,
+            savings_category: body.savings_category !== undefined ? body.savings_category : cur.savings_category,
+            savings_account_name: body.savings_account_name !== undefined ? body.savings_account_name : cur.savings_account_name,
         };
         if (body.envelopes !== undefined) {
             // keep names tidy: strip empties, drop dupes case-insensitively
@@ -820,6 +1008,10 @@ const Backend = {
         if (next.review_category !== cur.review_category) {
             this.run('UPDATE transactions SET category=? WHERE category=?', [next.review_category, cur.review_category]);
             this.run('UPDATE paycheck_allocations SET category=? WHERE category=?', [next.review_category, cur.review_category]);
+            // The savings pointer should never be the review bucket, but if an
+            // imported file says otherwise, keep it consistent instead of
+            // leaving it on a name that no longer exists.
+            if (next.savings_category === cur.review_category) next.savings_category = next.review_category;
         }
         this.saveCfg(next);
         this._dirty();
@@ -838,5 +1030,8 @@ function qAllRaw(db, sql, params) {
 }
 function objOf(o) { return Object.assign({}, o); }
 function defaultConfig() {
-    return { envelopes: [], review_category: DEFAULT_REVIEW, keywords: {} };
+    return {
+        envelopes: [], review_category: DEFAULT_REVIEW, keywords: {},
+        savings_category: '', savings_account_name: 'Savings account',
+    };
 }

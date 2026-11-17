@@ -127,6 +127,7 @@ body { background-color: #f8f9fa; }
   <ul class="nav nav-tabs mb-3">
     <li class="nav-item"><a class="nav-link active" data-tab="categories" href="#">Categories</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="transactions" href="#">Transactions</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="savings" href="#">Savings</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="review" href="#"><span id="review-name">Needs Review</span> (<span id="review-count">0</span>)</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="paychecks" href="#">Paychecks</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="report" href="#">Report</a></li>
@@ -259,6 +260,93 @@ body { background-color: #f8f9fa; }
     </div>
   </div>
 
+  <div id="tab-savings" class="d-none">
+    <div class="row g-3 mb-3">
+      <div class="col-12 col-lg-5">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5 class="mb-1" id="savings-title">Savings account</h5>
+            <p class="text-muted small mb-2">The money in your bank savings account. It is <strong>outside</strong> the checking budget, so moving money here lowers the Balance badge — that money has left checking.</p>
+            <div class="fs-3 fw-bold mb-2" id="savings-balance">$0.00</div>
+            <div class="input-group input-group-sm mb-3" style="max-width:300px">
+              <span class="input-group-text">Name</span>
+              <input id="savings-name" class="form-control" placeholder="Account name">
+              <button id="savings-name-save" class="btn btn-outline-primary" type="button">Save</button>
+            </div>
+            <div class="d-flex gap-2 flex-wrap">
+              <button id="savings-deposit-btn" class="btn btn-success btn-sm" type="button">Move to savings account</button>
+              <button id="savings-withdraw-btn" class="btn btn-outline-primary btn-sm" type="button">Move back to checking</button>
+              <button id="savings-adjust-btn" class="btn btn-outline-secondary btn-sm" type="button">Adjust balance</button>
+            </div>
+            <span id="savings-status" class="small d-block mt-2"></span>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-lg-7">
+        <div class="card h-100">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-1">
+              <h5 class="mb-0">Save it up first</h5>
+              <span class="badge bg-info fs-6" id="savings-ready">—</span>
+            </div>
+            <p class="text-muted small mb-2">Money still in checking that you have set aside to go to the account. Move it into this category with <strong>Set aside</strong>, or from the Categories tab.</p>
+            <div id="savings-cat-missing" class="alert alert-warning small d-none mb-2">
+              <div id="savings-cat-missing-msg"></div>
+              <div class="d-flex gap-2 flex-wrap align-items-center mt-2">
+                <button class="btn btn-primary btn-sm" id="savings-create-cat" type="button">Create "Savings" category</button>
+                <select id="savings-pick-cat" class="form-select form-select-sm" style="max-width:230px"></select>
+              </div>
+            </div>
+            <form id="savings-setaside-form" class="row g-2 align-items-end">
+              <div class="col-6 col-md-4">
+                <label class="form-label small mb-0">Take it out of</label>
+                <select class="form-select form-select-sm" id="savings-from"></select>
+              </div>
+              <div class="col-6 col-md-3">
+                <label class="form-label small mb-0">Amount</label>
+                <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="savings-amount" placeholder="0.00" required>
+              </div>
+              <div class="col-6 col-md-3">
+                <label class="form-label small mb-0">Date</label>
+                <input type="date" class="form-control form-control-sm" id="savings-date" required>
+              </div>
+              <div class="col-6 col-md-2 d-grid">
+                <button class="btn btn-outline-success btn-sm" type="submit" id="savings-setaside-btn">Set aside</button>
+              </div>
+              <div class="col-12">
+                <input type="text" class="form-control form-control-sm" id="savings-note" placeholder="Note (optional)">
+              </div>
+              <div class="col-12"><span id="savings-setaside-status" class="small"></span></div>
+            </form>
+            <div class="d-flex justify-content-between align-items-center mt-2 flex-wrap gap-2">
+              <span class="small text-muted" id="savings-move-hint"></span>
+              <button class="btn btn-link btn-sm p-0 d-none" id="savings-move-all" type="button">Move the ready amount to the account</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <h6 class="mb-1">Savings history</h6>
+        <p class="text-muted small mb-2">Every move into or out of the account, and every set-aside, newest first. The account column is the bank balance moving; set-asides stay in checking and only change which category holds the money.</p>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Date</th><th>What</th><th>Note</th><th class="text-end">Account</th></tr></thead>
+            <tbody id="savings-history-body"></tbody>
+          </table>
+        </div>
+        <h6 class="mb-1">By month</h6>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0" style="max-width:640px">
+            <thead><tr><th>Month</th><th class="text-end">Set aside</th><th class="text-end">To account</th><th class="text-end">From account</th><th class="text-end">Account change</th></tr></thead>
+            <tbody id="savings-months"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="tab-review" class="d-none">
     <div class="card">
       <div class="card-body p-2">
@@ -381,6 +469,8 @@ body { background-color: #f8f9fa; }
             <tr><td class="text-nowrap"><strong>Split</strong></td><td>Sharing one amount of money between more than one category.</td></tr>
             <tr><td class="text-nowrap"><strong>Transaction</strong></td><td>Money going out (an expense) or money coming in (income).</td></tr>
             <tr><td class="text-nowrap"><strong>Period</strong></td><td>The stretch of time you are budgeting for, like this month.</td></tr>
+            <tr><td class="text-nowrap"><strong>Savings account</strong></td><td>Money at your bank that is <em>outside</em> the checking budget. It has its own page and is not part of the Balance badge.</td></tr>
+            <tr><td class="text-nowrap"><strong>Set aside</strong></td><td>Moving money into the Savings <em>category</em> while it is still in checking, so it is ready to transfer to the account.</td></tr>
           </tbody>
         </table>
       </div>
@@ -436,6 +526,20 @@ body { background-color: #f8f9fa; }
       <div class="card-body">
         <p class="small text-muted mb-2">Plans change mid-month. If Food needs more and Fun has extra, open <strong>Categories</strong> and use <strong>Move money between categories</strong>: pick the box the money comes <em>from</em> and the box it goes <em>to</em>, type the amount, and click <strong>Move</strong>. The preview shows both boxes before you commit, and warns if the move puts one of them in the red.</p>
         <p class="small text-muted mb-0">The total does not change — the money just moves from one box to another. The move appears on the <strong>Transactions</strong> tab as a pair, and <strong>Undo</strong> is offered for a few seconds. After that, a wrong move is fixed by deleting the pair (the × next to it) and moving the money back.</p>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header bg-white"><h6 class="mb-0">Savings: the account and the category are two different things</h6></div>
+      <div class="card-body">
+        <p class="small text-muted mb-2">Your <strong>savings account at the bank</strong> is not part of the checking budget shown on the Categories tab. The <strong>Savings category</strong> is money still in checking that you have set aside to move there.</p>
+        <ol class="small text-muted mb-2 ps-3">
+          <li><strong>Set aside</strong> — on the <strong>Savings</strong> tab, move money from a category into the Savings category. Nothing leaves checking; the money just waits in the right box.</li>
+          <li><strong>Move to savings account</strong> — the real bank transfer. The Savings category goes down, the account on the Savings tab goes up, and the Balance badge drops because that money left checking.</li>
+          <li><strong>Move back to checking</strong> — move money out of the account into a category you pick. The Balance badge rises again.</li>
+          <li><strong>Adjust balance</strong> — type what the bank says (interest, a forgotten transfer). The difference is recorded on the account only; your budget totals do not change.</li>
+        </ol>
+        <p class="small text-muted mb-0">A move to or from the account appears on the <strong>Transactions</strong> tab as one row, and the <strong>Report</strong> shows "moved to savings / from savings" as its own line rather than counting saving as spending. Deleting the row moves the account back too, and Undo is offered.</p>
       </div>
     </div>
 
@@ -533,6 +637,40 @@ body { background-color: #f8f9fa; }
       <div class="modal-footer">
         <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
         <button class="btn btn-primary btn-sm" id="edit-save">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="savings-modal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title" id="savings-modal-title">Move to savings account</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p id="savings-modal-help" class="small text-muted"></p>
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label small mb-0" id="savings-modal-amount-label">Amount</label>
+            <input type="number" step="0.01" min="0" class="form-control form-control-sm" id="savings-modal-amount">
+          </div>
+          <div class="col-6">
+            <label class="form-label small mb-0">Date</label>
+            <input type="date" class="form-control form-control-sm" id="savings-modal-date">
+          </div>
+          <div class="col-12 d-none" id="savings-modal-cat-wrap">
+            <label class="form-label small mb-0">Put it back into</label>
+            <select class="form-select form-select-sm" id="savings-modal-cat"></select>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-0">Note (optional)</label>
+            <input type="text" class="form-control form-control-sm" id="savings-modal-note">
+          </div>
+        </div>
+        <div id="savings-modal-preview" class="small mt-2"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="savings-modal-save">Move</button>
       </div>
     </div>
   </div>
