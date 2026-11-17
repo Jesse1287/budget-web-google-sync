@@ -184,6 +184,40 @@ body { background-color: #f8f9fa; }
   </div>
 
   <div id="tab-categories">
+    <div class="card mb-3">
+      <div class="card-body p-2">
+        <h6 class="mb-1">Move money between categories</h6>
+        <p class="text-muted small mb-2">Plans change mid-month: move money from one box to another. The total stays the same.</p>
+        <form id="transfer-form" class="row g-2 align-items-end">
+          <div class="col-6 col-md-3">
+            <label class="form-label small mb-0">From</label>
+            <select class="form-select form-select-sm" id="transfer-from"></select>
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small mb-0">To</label>
+            <select class="form-select form-select-sm" id="transfer-to"></select>
+          </div>
+          <div class="col-4 col-md-2">
+            <label class="form-label small mb-0">Amount</label>
+            <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="transfer-amount" placeholder="0.00" required>
+          </div>
+          <div class="col-4 col-md-2">
+            <label class="form-label small mb-0">Date</label>
+            <input type="date" class="form-control form-control-sm" id="transfer-date" required>
+          </div>
+          <div class="col-4 col-md-2 d-grid">
+            <button class="btn btn-primary btn-sm" type="submit" id="transfer-submit">Move</button>
+          </div>
+          <div class="col-12 col-md-6">
+            <input type="text" class="form-control form-control-sm" id="transfer-note" placeholder="Note (optional)">
+          </div>
+          <div class="col-12 col-md-6">
+            <span id="transfer-preview" class="small text-muted"></span>
+            <span id="transfer-status" class="small"></span>
+          </div>
+        </form>
+      </div>
+    </div>
     <div class="card">
       <div class="card-body p-2">
         <p class="text-muted small mb-1">What's left in each category after paychecks and spending.</p>
@@ -204,6 +238,7 @@ body { background-color: #f8f9fa; }
       <select id="tx-filter-type" class="form-select form-select-sm" style="width:auto">
         <option value="expense">Expenses</option>
         <option value="income">Income</option>
+        <option value="transfer">Transfers</option>
         <option value="all">All</option>
       </select>
       <select id="tx-filter-category" class="form-select form-select-sm cat-select"></select>
@@ -393,6 +428,14 @@ body { background-color: #f8f9fa; }
 
         <p class="small mb-1 mt-3"><strong>You want to see how you are doing</strong></p>
         <p class="small text-muted"><strong>Categories</strong> shows what is left in each box. Green means you still have money there. Red means you went over. <strong>Report</strong> shows where the money went this period.</p>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header bg-white"><h6 class="mb-0">Moving money between categories</h6></div>
+      <div class="card-body">
+        <p class="small text-muted mb-2">Plans change mid-month. If Food needs more and Fun has extra, open <strong>Categories</strong> and use <strong>Move money between categories</strong>: pick the box the money comes <em>from</em> and the box it goes <em>to</em>, type the amount, and click <strong>Move</strong>. The preview shows both boxes before you commit, and warns if the move puts one of them in the red.</p>
+        <p class="small text-muted mb-0">The total does not change — the money just moves from one box to another. The move appears on the <strong>Transactions</strong> tab as a pair, and <strong>Undo</strong> is offered for a few seconds. After that, a wrong move is fixed by deleting the pair (the × next to it) and moving the money back.</p>
       </div>
     </div>
 

@@ -5,6 +5,13 @@ const japi = (path, method, body) => api(path, { method, headers: { 'Content-Typ
 const fmt = n => (n === null || n === undefined) ? '—' : '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Rows the app writes itself that must not be reshaped by the generic editor:
+// a transfer pair, a card payment, a savings deposit/withdrawal. Editing one
+// leg or split total would unbalance the pair/ledger, so they render read-only
+// (delete the head to undo the whole movement).
+const SYS_SOURCES = ['transfer', 'cc_payment', 'savings', 'savings_withdrawal'];
+const sysRow = source => SYS_SOURCES.indexOf(source) >= 0;
+
 // Google Drive reports modifiedTime as an RFC3339 string, and Number() of that is
 // NaN. Every comparison here used to be "0 > 0", which meant a browser with an
 // old cache could decide it was newer than Drive and overwrite it, and polling
@@ -513,6 +520,58 @@ function fillCategorySelects() {
   $('tx-filter-category').innerHTML = '<option value="">All categories</option>' + opts;
   $('pk-envelopes').innerHTML = categories.map(c => `<option value="${esc(c)}">`).join('');
   fillMergeSelects();
+  fillTransferSelects();
+}
+
+// From/To pickers on the Categories tab. The review bucket is left out for the
+// same reason the backend refuses to merge it: it has no balance to move.
+function fillTransferSelects() {
+  const from = $('transfer-from'), to = $('transfer-to');
+  if (!from || !to) return;
+  const list = categories.filter(c => c !== REVIEW_CAT);
+  const keep = [from.value, to.value];
+  const opts = list.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  from.innerHTML = opts;
+  to.innerHTML = opts;
+  if (list.includes(keep[0])) from.value = keep[0];
+  if (list.includes(keep[1])) to.value = keep[1];
+  if (from.value && from.value === to.value) {
+    const alt = list.find(c => c !== from.value);
+    if (alt) to.value = alt;
+  }
+  $('transfer-submit').disabled = list.length < 2;
+  updateTransferPreview();
+}
+
+// "Food $450.00 → $500.00 · Savings $120.00 → $70.00 · Total unchanged"
+function updateTransferPreview() {
+  const el = $('transfer-preview');
+  if (!el) return;
+  const from = $('transfer-from').value, to = $('transfer-to').value;
+  const amtC = Math.round((parseFloat($('transfer-amount').value) || 0) * 100);
+  const bal = name => {
+    const e = allocEnvelopes.find(x => x.name === name);
+    return e ? e.available : null;
+  };
+  if (!from || !to) {
+    el.textContent = 'Add at least two categories in Settings first.';
+    el.className = 'small text-muted';
+    return;
+  }
+  if (amtC <= 0) {
+    el.textContent = 'Enter an amount to see what moves.';
+    el.className = 'small text-muted';
+    return;
+  }
+  const amt = amtC / 100;
+  const a = bal(from), b = bal(to);
+  const parts = [];
+  if (a !== null) parts.push(`${from} ${fmt(a)} → ${fmt(a - amt)}`);
+  if (b !== null) parts.push(`${to} ${fmt(b)} → ${fmt(b + amt)}`);
+  const red = (a !== null && a - amt < 0) || (b !== null && b + amt < 0);
+  el.innerHTML = esc(parts.join(' · ')) + ' · Total unchanged' +
+    (red ? ' — <strong>one of them goes into the red</strong>' : '');
+  el.className = 'small ' + (red ? 'text-danger' : 'text-success');
 }
 
 // Settings → Categories → merge pickers. The review bucket is left out: it is
@@ -551,6 +610,7 @@ async function loadSummary() {
     return `<tr class="${cls}"><td>${esc(e.name)}${tag}</td><td class="text-end">${bal}</td></tr>`;
   }).join('');
   allocEnvelopes = s.envelopes.filter(e => e.available !== null);
+  updateTransferPreview();
   const catHint = $('cat-hint');
   if (catHint) catHint.classList.toggle('d-none', allocEnvelopes.length > 0);
   if (!closeGridLoaded) {
@@ -693,28 +753,44 @@ async function loadTransactions(reset) {
   });
 
   const catOpts = c => categories.map(x => `<option value="${esc(x)}" ${x === c ? 'selected' : ''}>${esc(x)}</option>`).join('');
+  const headLabel = t => {
+    if (t.source === 'transfer') return 'Transfer';
+    if (t.source === 'cc_payment') return 'Card payment';
+    if (t.source === 'savings' || t.source === 'savings_withdrawal') return 'Savings';
+    return t.type === 'income' ? 'Income' : 'Split';
+  };
   const rowHtml = t => {
     const sign = t.amount < 0 ? 'neg' : 'pos';
     const parent = t.category === PARENT_MARKER || byParent.has(t.id);
+    const readOnly = sysRow(t.source);
     const hint = hints[t.description];
     const catCell = parent
-      ? `<td class="small text-muted">${t.type === 'income' ? 'Income' : 'Split'}</td>`
-      : `<td><select class="form-select form-select-sm tx-cat" data-id="${t.id}" style="max-width:160px">${catOpts(t.category)}</select>${t.category === REVIEW_CAT && hint ? `<div class="mt-1"><button class="btn btn-outline-info btn-sm tx-hint" data-id="${t.id}" data-cat="${esc(hint)}" title="Suggested from past purchases">→ ${esc(hint)}</button></div>` : ''}</td>`;
+      ? `<td class="small text-muted">${esc(headLabel(t))}</td>`
+      : readOnly
+        ? `<td>${esc(t.category)}</td>`
+        : `<td><select class="form-select form-select-sm tx-cat" data-id="${t.id}" style="max-width:160px">${catOpts(t.category)}</select>${t.category === REVIEW_CAT && hint ? `<div class="mt-1"><button class="btn btn-outline-info btn-sm tx-hint" data-id="${t.id}" data-cat="${esc(hint)}" title="Suggested from past purchases">→ ${esc(hint)}</button></div>` : ''}</td>`;
     const editAmt = t.type === 'expense' ? Math.abs(t.amount) : t.amount;
-    const canSplit = t.type !== 'allocation' && (parent ? t.type === 'expense' : true);
+    const canSplit = !readOnly && t.type !== 'allocation' && (parent ? t.type === 'expense' : true);
     const split = canSplit ? `<button class="btn btn-outline-secondary btn-sm tx-split" data-id="${t.id}" data-desc="${esc(t.description)}" data-amt="${Math.abs(t.amount)}">Split</button>` : '';
-    const edit = `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${parent ? '' : esc(t.category)}" data-t="${t.type}" data-head="${parent ? 1 : 0}" title="Edit">✎</button>`;
+    const edit = readOnly ? '' : `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${parent ? '' : esc(t.category)}" data-t="${t.type}" data-head="${parent ? 1 : 0}" title="Edit">✎</button>`;
     return `<tr><td>${t.date}</td><td>${esc(t.description)}</td>${catCell}<td class="text-end ${sign}">${parent ? '<strong>' + fmt(t.amount) + '</strong>' : fmt(t.amount)}</td><td class="text-end">${edit}${split}<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" title="Delete" aria-label="Delete">×</button></td></tr>`;
   };
   const childHtml = k => {
     const sign = k.amount < 0 ? 'neg' : 'pos';
     const editAmt = k.type === 'expense' ? Math.abs(k.amount) : k.amount;
-    return `<tr class="tx-child"><td></td><td class="ps-4">↳ <span class="text-muted">${esc(k.category)}</span></td><td></td><td class="text-end ${sign}">${fmt(k.amount)}</td><td class="text-end"><button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${k.id}" data-d="${k.date}" data-n="${esc(k.description)}" data-a="${editAmt}" data-c="${esc(k.category)}" data-t="${k.type}" data-head="0" title="Edit">✎</button></td></tr>`;
+    const edit = sysRow(k.source) ? '' : `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${k.id}" data-d="${k.date}" data-n="${esc(k.description)}" data-a="${editAmt}" data-c="${esc(k.category)}" data-t="${k.type}" data-head="0" title="Edit">✎</button>`;
+    return `<tr class="tx-child"><td></td><td class="ps-4">↳ <span class="text-muted">${esc(k.category)}</span></td><td></td><td class="text-end ${sign}">${fmt(k.amount)}</td><td class="text-end">${edit}</td></tr>`;
   };
   const orphanHtml = t => {
     const sign = t.amount < 0 ? 'neg' : 'pos';
     const editAmt = t.type === 'expense' ? Math.abs(t.amount) : t.amount;
-    return `<tr class="tx-child"><td>${t.date}</td><td class="ps-4">↳ <span class="text-muted">part of a split not on this page</span></td><td><select class="form-select form-select-sm tx-cat" data-id="${t.id}">${catOpts(t.category)}</select></td><td class="text-end ${sign}">${fmt(t.amount)}</td><td class="text-end"><button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${esc(t.category)}" data-t="${t.type}" data-head="0" title="Edit">✎</button><button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" title="Delete" aria-label="Delete">×</button></td></tr>`;
+    const readOnly = sysRow(t.source);
+    const catCell = readOnly
+      ? `<td>${esc(t.category)}</td>`
+      : `<td><select class="form-select form-select-sm tx-cat" data-id="${t.id}">${catOpts(t.category)}</select></td>`;
+    const edit = readOnly ? '' : `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${esc(t.category)}" data-t="${t.type}" data-head="0" title="Edit">✎</button>`;
+    const del = readOnly ? '' : `<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" title="Delete" aria-label="Delete">×</button>`;
+    return `<tr class="tx-child"><td>${t.date}</td><td class="ps-4">↳ <span class="text-muted">part of a split not on this page</span></td>${catCell}<td class="text-end ${sign}">${fmt(t.amount)}</td><td class="text-end">${edit}${del}</td></tr>`;
   };
 
   let html = '';
@@ -1457,6 +1533,7 @@ editModal = new bootstrap.Modal($('edit-modal'));
 $('add-date').value = localDate();
 $('close-date').value = localDate();
 $('report-month').value = localMonth();
+$('transfer-date').value = localDate();
 
 document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
   a.addEventListener('click', async e => {
@@ -1635,6 +1712,42 @@ $('add-form').addEventListener('submit', async e => {
   } catch (err) {
     status.textContent = err.message;
     status.className = 'small text-danger';
+  }
+});
+
+['transfer-from', 'transfer-to'].forEach(id => {
+  $(id).addEventListener('change', updateTransferPreview);
+});
+$('transfer-amount').addEventListener('input', updateTransferPreview);
+
+$('transfer-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const status = $('transfer-status');
+  const from = $('transfer-from').value;
+  const to = $('transfer-to').value;
+  const amount = Math.round((parseFloat($('transfer-amount').value) || 0) * 100) / 100;
+  const date = $('transfer-date').value;
+  const note = $('transfer-note').value.trim();
+  const fail = msg => { status.textContent = msg; status.className = 'small text-danger'; };
+  if (!from || !to) return fail('Add at least two categories in Settings first.');
+  if (from === to) return fail('Pick two different categories.');
+  if (!(amount > 0)) return fail('Enter an amount greater than zero.');
+  if (!date) return fail('Pick a date.');
+
+  const snapshot = Backend.exportBinary();
+  status.textContent = 'Moving…';
+  status.className = 'small text-muted';
+  try {
+    await japi('/api/transfers', 'POST', { from, to, amount, date, note });
+    offerUndo('Moved ' + fmt(amount) + ' from ' + from + ' to ' + to + '.', snapshot);
+    $('transfer-amount').value = '';
+    $('transfer-note').value = '';
+    status.textContent = 'Moved.';
+    status.className = 'small text-success';
+    await refreshApp();
+    updateTransferPreview();
+  } catch (err) {
+    fail(err.message);
   }
 });
 

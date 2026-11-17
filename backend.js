@@ -236,7 +236,11 @@ const Backend = {
         const args = [];
         const txType = p.type || 'expense';
         if (txType && txType !== 'all') {
-            if (txType === 'income') { clauses.push('type IN (?, ?)'); args.push('income', 'allocation'); }
+            // A transfer is a split-shaped pair: the head and both legs carry
+            // source='transfer', so asking for the source lists the whole
+            // block and the Transactions tab can group it like any split.
+            if (txType === 'transfer') { clauses.push('source = ?'); args.push('transfer'); }
+            else if (txType === 'income') { clauses.push('type IN (?, ?)'); args.push('income', 'allocation'); }
             else { clauses.push('type = ?'); args.push(txType); }
         }
         if (p.category) { clauses.push('category = ?'); args.push(p.category); }
@@ -294,7 +298,7 @@ const Backend = {
         this.qAll("SELECT description, amount FROM transactions WHERE type='income' AND date LIKE ?", [prefix])
             .forEach(r => setIn(r.description, r.amount, 'Income'));
         this.qAll("SELECT description, SUM(amount) AS t FROM transactions WHERE type='allocation' AND parent_id IS NULL " +
-            "AND source != 'carryover' AND date LIKE ? GROUP BY lower(description), description", [prefix])
+            "AND source != 'carryover' AND source != 'transfer' AND date LIKE ? GROUP BY lower(description), description", [prefix])
             .forEach(r => setIn(r.description, r.t, 'Allocation'));
 
         const expenseRows = this.qAll(
@@ -390,6 +394,7 @@ const Backend = {
         } else if (method === 'POST') {
             if (route === 'transactions') result = this._addTransaction(body);
             else if (route === 'income') result = this._addIncome(body);
+            else if (route === 'transfers') result = this._addTransfer(body);
             else if (route === 'period/close') result = this._closePeriod(body);
             else if (route === 'paychecks') result = this._createPaycheck(body);
             else if (seg[0] === 'transactions' && seg[2] === 'split') result = this._splitTransaction(parseInt(seg[1], 10), body);
@@ -449,6 +454,37 @@ const Backend = {
                 [date, name, amt, cat, 'allocation', 'manual', parentId]);
         }
         return { id: parentId };
+    },
+
+    // A transfer is one split-shaped pair: a head under __split__ and two
+    // allocation legs (+X destination, −X source). summary() then moves the
+    // money between the two envelopes and leaves the total untouched, and the
+    // existing split rendering groups the three rows into one block.
+    _addTransfer(d) {
+        const from = String(d.from || '').trim();
+        const to = String(d.to || '').trim();
+        const date = String(d.date || '').trim();
+        const note = String(d.note || '').trim();
+        const amount = round2(parseFloat(d.amount));
+        const rev = this.cfg().review_category;
+        if (!from || !to) throw new Error('pick the category to move from and the one to move to');
+        if (from === to) throw new Error('pick two different categories');
+        if (from === PARENT_MARKER || to === PARENT_MARKER) throw new Error('that is not a valid category');
+        if (from.toLowerCase() === rev.toLowerCase() || to.toLowerCase() === rev.toLowerCase()) {
+            throw new Error('"' + rev + '" is the review category — it has no balance to move');
+        }
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount must be greater than zero');
+        if (date.length !== 10 || date.charAt(4) !== '-' || date.charAt(7) !== '-') throw new Error('date must be YYYY-MM-DD');
+
+        const description = 'Transfer: ' + from + ' → ' + to + (note ? ' — ' + note : '');
+        this.run('INSERT INTO transactions (date, description, amount, category, type, source) VALUES (?,?,?,?,?,?)',
+            [date, description, amount, PARENT_MARKER, 'allocation', 'transfer']);
+        const id = this.lastInsertId();
+        this.run('INSERT INTO transactions (date, description, amount, category, type, source, parent_id) VALUES (?,?,?,?,?,?,?)',
+            [date, description, amount, to, 'allocation', 'transfer', id]);
+        this.run('INSERT INTO transactions (date, description, amount, category, type, source, parent_id) VALUES (?,?,?,?,?,?,?)',
+            [date, description, -amount, from, 'allocation', 'transfer', id]);
+        return { id, from, to, amount };
     },
 
     _splitTransaction(id, d) {
