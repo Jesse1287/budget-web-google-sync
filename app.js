@@ -47,11 +47,14 @@ let undoState = null;         // DB snapshot offered as "Undo" after a delete
 let undoTimer = null;
 let dailyBackupTried = '';
 let idbPromise = null;
-let splitModal, editModal, savingsModal;
+let splitModal, editModal, savingsModal, ccPayModal, ccChargeModal;
 let splitTargetId = null;
 let editTarget = null;
 let savingsData = null;
 let savingsMode = 'deposit';
+let ccData = [];
+let ccPayCard = null;
+let ccEditTarget = null;
 
 function openIDB() {
   if (!idbPromise) {
@@ -521,6 +524,8 @@ function fillCategorySelects() {
   $('add-category').innerHTML = opts;
   $('tx-filter-category').innerHTML = '<option value="">All categories</option>' + opts;
   $('pk-envelopes').innerHTML = categories.map(c => `<option value="${esc(c)}">`).join('');
+  const ccList = $('cc-cat-list');
+  if (ccList) ccList.innerHTML = categories.filter(c => c !== REVIEW_CAT).map(c => `<option value="${esc(c)}">`).join('');
   fillMergeSelects();
   fillTransferSelects();
 }
@@ -703,6 +708,16 @@ async function refreshCloseGrid() {
   const avail = {};
   s.envelopes.forEach(e => { if (e.available !== null) avail[e.name] = e.available; });
   buildCloseGrid(avail);
+  // An unpaid card is not part of any envelope: it simply waits for the next
+  // period. Say so in the close form instead of letting it surprise anyone.
+  const owedEl = $('close-owed');
+  if (owedEl) {
+    const cards = (await api('/api/credit-cards')).filter(c => c.owed > 0);
+    owedEl.innerHTML = cards.length
+      ? 'Note: ' + cards.map(c => fmt(c.owed) + ' still owed on ' + esc(c.name)).join(', ') +
+        ' — it carries into the new period and waits until you pay it.'
+      : '';
+  }
 }
 
 function updateCloseTotal() {
@@ -1457,6 +1472,205 @@ async function saveSavingsModal() {
   }
 }
 
+// ---- credit cards (charges wait here until the card is paid) ----
+function setCcStatus(cardId, msg, cls) {
+  const el = document.querySelector('[data-card="' + cardId + '"] .cc-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'small ' + (cls || 'text-muted');
+}
+
+function ccChargeRow(cardId, ch) {
+  const tag = ch.category
+    ? `<span class="badge bg-light text-dark border">${esc(ch.category)}</span>`
+    : '<span class="text-muted">—</span>';
+  const status = ch.status === 'paid'
+    ? 'Paid' + (ch.paid_date ? ' ' + ch.paid_date : '')
+    : ch.status === 'partial'
+      ? 'Part paid ' + fmt(ch.paid) + ' of ' + fmt(ch.amount)
+      : 'Unpaid';
+  const actions = ch.status === 'unpaid'
+    ? `<button class="btn btn-outline-secondary btn-sm cc-edit" data-card="${cardId}" data-charge="${ch.id}" title="Edit">✎</button>
+       <button class="btn btn-outline-danger btn-sm cc-del-charge" data-card="${cardId}" data-charge="${ch.id}" title="Delete" aria-label="Delete">×</button>`
+    : '<span class="small text-muted">history</span>';
+  return `<tr><td class="text-nowrap">${ch.date}</td><td>${esc(ch.description)}</td><td>${tag}</td>` +
+    `<td class="text-end">${fmt(ch.amount)}</td><td class="small ${ch.status === 'paid' ? 'text-success' : (ch.status === 'partial' ? 'text-warning' : 'text-muted')}">${esc(status)}</td>` +
+    `<td class="text-end text-nowrap">${actions}</td></tr>`;
+}
+
+function ccCardHtml(c) {
+  const rows = c.charges.length
+    ? c.charges.map(ch => ccChargeRow(c.id, ch)).join('')
+    : '<tr><td colspan="6" class="text-muted small">No charges yet. Add one above.</td></tr>';
+  const owed = c.owed > 0
+    ? `<div class="fs-4 fw-bold neg">${fmt(c.owed)}</div><div class="small text-muted">still owed</div>`
+    : `<div class="fs-4 fw-bold pos">${fmt(0)}</div><div class="small text-success">All caught up ✓</div>`;
+  return `<div class="card mb-3" data-card="${c.id}">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
+        <div class="input-group input-group-sm" style="max-width:300px">
+          <span class="input-group-text">Card</span>
+          <input class="form-control cc-name" value="${esc(c.name)}" aria-label="Card name">
+          <button class="btn btn-outline-primary cc-rename" type="button" data-card="${c.id}">Save</button>
+        </div>
+        <div class="d-flex align-items-center gap-3 flex-wrap">
+          <div class="text-end">${owed}</div>
+          <div class="d-flex gap-2 flex-wrap">
+            <button class="btn btn-success btn-sm cc-pay" type="button" data-card="${c.id}" ${c.owed > 0 ? '' : 'disabled'}>Pay card</button>
+            <button class="btn btn-outline-danger btn-sm cc-del-card" type="button" data-card="${c.id}">Delete card</button>
+          </div>
+        </div>
+      </div>
+      <form class="row g-2 align-items-end cc-charge-form" data-card="${c.id}">
+        <div class="col-6 col-md-2">
+          <label class="form-label small mb-0">Date</label>
+          <input type="date" class="form-control form-control-sm cc-date" value="${localDate()}" required>
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label small mb-0">What</label>
+          <input type="text" class="form-control form-control-sm cc-desc" placeholder="Groceries" required>
+        </div>
+        <div class="col-4 col-md-2">
+          <label class="form-label small mb-0">Amount</label>
+          <input type="number" step="0.01" min="0.01" class="form-control form-control-sm cc-amount" placeholder="0.00" required>
+        </div>
+        <div class="col-4 col-md-3">
+          <label class="form-label small mb-0">Category (optional)</label>
+          <input type="text" class="form-control form-control-sm cc-cat" list="cc-cat-list" placeholder="Food, Gas…">
+        </div>
+        <div class="col-4 col-md-2 d-grid">
+          <button class="btn btn-outline-primary btn-sm" type="submit">Add charge</button>
+        </div>
+        <div class="col-12"><span class="small cc-status"></span></div>
+      </form>
+      <div class="table-responsive mt-2">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Date</th><th>What</th><th>Category</th><th class="text-end">Amount</th><th>Status</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function loadCreditCards() {
+  if (!categories.length) await loadCategories();
+  const cards = await api('/api/credit-cards');
+  ccData = cards;
+  $('cc-empty').classList.toggle('d-none', cards.length > 0);
+  $('cc-cards').innerHTML = cards.map(ccCardHtml).join('');
+}
+
+function openCcPay(cardId) {
+  const card = (ccData || []).find(c => c.id === cardId);
+  if (!card) return;
+  if (!(card.owed > 0)) return;
+  ccPayCard = card;
+  $('cc-pay-title').textContent = 'Pay ' + card.name;
+  $('cc-pay-amount').value = Number(card.owed).toFixed(2);
+  $('cc-pay-amount').max = String(card.owed);
+  $('cc-pay-date').value = localDate();
+  $('cc-pay-help').textContent = 'Still owed ' + fmt(card.owed) +
+    '. A part payment is fine — the oldest charges are paid first, and the rest stays on the card.';
+  ccPayModal.show();
+  updateCcPayPreview();
+}
+
+let ccPreviewSeq = 0;
+async function updateCcPayPreview() {
+  const el = $('cc-pay-preview');
+  if (!ccPayCard) return;
+  const amt = Math.round((parseFloat($('cc-pay-amount').value) || 0) * 100) / 100;
+  if (!(amt > 0)) {
+    el.textContent = 'Enter an amount to see where it goes.';
+    el.className = 'small mt-3 text-muted';
+    return;
+  }
+  const seq = ++ccPreviewSeq;
+  try {
+    const pv = await api('/api/credit-cards/' + ccPayCard.id + '/preview?amount=' + encodeURIComponent(amt));
+    if (seq !== ccPreviewSeq) return;
+    const parts = pv.groups.map(g => `<strong>${esc(g.category)}</strong> −${fmt(g.amount)}`);
+    el.innerHTML = 'This payment will go to transactions as: ' + parts.join(', ') +
+      (pv.remaining > 0 ? `<br><span class="text-muted">${fmt(pv.remaining)} stays on the card.</span>` : '');
+    el.className = 'small mt-3 text-success';
+  } catch (e) {
+    if (seq !== ccPreviewSeq) return;
+    el.textContent = e.message;
+    el.className = 'small mt-3 text-danger';
+  }
+}
+
+async function saveCcPay() {
+  if (!ccPayCard) return;
+  const amt = Math.round((parseFloat($('cc-pay-amount').value) || 0) * 100) / 100;
+  const date = $('cc-pay-date').value;
+  const preview = $('cc-pay-preview');
+  const failMsg = msg => { preview.textContent = msg; preview.className = 'small mt-3 text-danger'; };
+  if (!(amt > 0)) return failMsg('Enter an amount greater than zero.');
+  if (!date) return failMsg('Pick a date.');
+  const card = ccPayCard;
+  const snapshot = Backend.exportBinary();
+  $('cc-pay-save').disabled = true;
+  try {
+    const r = await japi('/api/credit-cards/' + card.id + '/pay', 'POST', { amount: amt, date });
+    ccPayModal.hide();
+    offerUndo('Paid ' + fmt(r.amount) + ' on ' + card.name + '.', snapshot);
+    await refreshApp();
+    setCcStatus(card.id, r.remaining > 0
+      ? 'Paid ' + fmt(r.amount) + ' — ' + fmt(r.remaining) + ' still owed.'
+      : 'Paid off. All caught up ✓', 'text-success');
+  } catch (e) {
+    failMsg(e.message);
+  } finally {
+    $('cc-pay-save').disabled = false;
+  }
+}
+
+function openCcCharge(cardId, chargeId) {
+  const card = (ccData || []).find(c => c.id === cardId);
+  const ch = card && card.charges.find(x => x.id === chargeId);
+  if (!ch) return;
+  if (ch.status !== 'unpaid') {
+    alert('That charge is already (partly) paid, so it is history now. Delete the payment if it was wrong.');
+    return;
+  }
+  ccEditTarget = { cardId: cardId, chargeId: chargeId };
+  $('cc-charge-date').value = ch.date;
+  $('cc-charge-amount').value = Number(ch.amount).toFixed(2);
+  $('cc-charge-desc').value = ch.description;
+  $('cc-charge-cat').value = ch.category || '';
+  $('cc-charge-status').textContent = '';
+  ccChargeModal.show();
+}
+
+async function saveCcCharge() {
+  if (!ccEditTarget) return;
+  const status = $('cc-charge-status');
+  const failMsg = msg => { status.textContent = msg; status.className = 'small text-danger mt-2'; };
+  const body = {
+    date: $('cc-charge-date').value,
+    description: $('cc-charge-desc').value.trim(),
+    amount: $('cc-charge-amount').value,
+    category: $('cc-charge-cat').value.trim(),
+  };
+  if (!body.date) return failMsg('Pick a date.');
+  if (!body.description) return failMsg('What was bought? A short description is required.');
+  if (!(parseFloat(body.amount) > 0)) return failMsg('Enter an amount greater than zero.');
+  const target = ccEditTarget;
+  $('cc-charge-save').disabled = true;
+  try {
+    await japi('/api/credit-cards/' + target.cardId + '/charges/' + target.chargeId, 'PATCH', body);
+    ccChargeModal.hide();
+    await refreshApp();
+    setCcStatus(target.cardId, 'Charge updated.', 'text-success');
+  } catch (e) {
+    failMsg(e.message);
+  } finally {
+    $('cc-charge-save').disabled = false;
+  }
+}
+
 function renderEnvChips() {
   $('env-chips').innerHTML = envDraft.length
     ? envDraft.map((c, i) => `<span class="badge bg-light text-dark border me-1 mb-1">${esc(c)} <button type="button" class="btn btn-sm p-0 ms-1 env-rm" data-i="${i}" title="Remove">×</button></span>`).join('')
@@ -1491,6 +1705,7 @@ async function refreshApp() {
   await loadIncomeChecks();
   if (!$('tab-transactions').classList.contains('d-none')) await loadTransactions(true);
   if (!$('tab-savings').classList.contains('d-none')) await loadSavings();
+  if (!$('tab-credit-cards').classList.contains('d-none')) await loadCreditCards();
   if (!$('tab-paychecks').classList.contains('d-none')) await loadPaychecks();
   if (!$('tab-report').classList.contains('d-none') && $('report-month').value) await loadReport();
   if (!$('tab-settings').classList.contains('d-none')) await loadSettings();
@@ -1725,6 +1940,8 @@ async function saveEnvelopes() {
 splitModal = new bootstrap.Modal($('split-modal'));
 editModal = new bootstrap.Modal($('edit-modal'));
 savingsModal = new bootstrap.Modal($('savings-modal'));
+ccPayModal = new bootstrap.Modal($('cc-pay-modal'));
+ccChargeModal = new bootstrap.Modal($('cc-charge-modal'));
 
 $('add-date').value = localDate();
 $('close-date').value = localDate();
@@ -1736,7 +1953,7 @@ document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
     e.preventDefault();
     document.querySelectorAll('.nav-tabs .nav-link').forEach(x => x.classList.remove('active'));
     a.classList.add('active');
-    ['categories', 'transactions', 'savings', 'review', 'paychecks', 'report', 'settings', 'help'].forEach(t => {
+    ['categories', 'transactions', 'savings', 'credit-cards', 'review', 'paychecks', 'report', 'settings', 'help'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('d-none', t !== a.dataset.tab);
     });
@@ -1744,6 +1961,7 @@ document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
     try {
       if (a.dataset.tab === 'transactions') { await loadTransactions(true); await loadIncomeChecks(); }
       if (a.dataset.tab === 'savings') await loadSavings();
+      if (a.dataset.tab === 'credit-cards') await loadCreditCards();
       if (a.dataset.tab === 'paychecks') { await loadPaychecks(); await loadIncomeChecks(); }
       if (a.dataset.tab === 'review') await loadReview();
       if (a.dataset.tab === 'report') { if ($('report-month').value) await loadReport(); }
@@ -2014,6 +2232,80 @@ $('savings-setaside-form').addEventListener('submit', async e => {
     fail(err.message);
   }
 });
+
+// ---- credit cards tab wiring ----
+$('cc-add').addEventListener('click', async () => {
+  const name = $('cc-new-name').value.trim();
+  try {
+    await japi('/api/credit-cards', 'POST', { name: name || 'Credit card' });
+    $('cc-new-name').value = '';
+    await refreshApp();
+  } catch (e) { alert(e.message); }
+});
+
+// Every card is rendered from one template, so the buttons and the add-charge
+// form are handled here by delegation instead of a listener per card.
+$('cc-cards').addEventListener('click', async e => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const cardId = Number(btn.dataset.card);
+  try {
+    if (btn.classList.contains('cc-pay')) {
+      openCcPay(cardId);
+    } else if (btn.classList.contains('cc-rename')) {
+      const input = btn.closest('.input-group').querySelector('.cc-name');
+      await japi('/api/credit-cards/' + cardId, 'PATCH', { name: input.value });
+      await refreshApp();
+      setCcStatus(cardId, 'Name saved.', 'text-success');
+    } else if (btn.classList.contains('cc-del-card')) {
+      const card = (ccData || []).find(c => c.id === cardId);
+      if (!confirm('Delete the card "' + (card ? card.name : '') + '" and its charge history?')) return;
+      const snapshot = Backend.exportBinary();
+      await japi('/api/credit-cards/' + cardId, 'DELETE');
+      offerUndo('Card deleted.', snapshot);
+      await refreshApp();
+    } else if (btn.classList.contains('cc-edit')) {
+      openCcCharge(cardId, Number(btn.dataset.charge));
+    } else if (btn.classList.contains('cc-del-charge')) {
+      if (!confirm('Delete this charge?')) return;
+      const snapshot = Backend.exportBinary();
+      await japi('/api/credit-cards/' + cardId + '/charges/' + btn.dataset.charge, 'DELETE');
+      offerUndo('Charge deleted.', snapshot);
+      await refreshApp();
+    }
+  } catch (err) {
+    setCcStatus(cardId, err.message, 'text-danger');
+  }
+});
+
+$('cc-cards').addEventListener('submit', async e => {
+  const form = e.target.closest('.cc-charge-form');
+  if (!form) return;
+  e.preventDefault();
+  const cardId = Number(form.dataset.card);
+  const status = form.querySelector('.cc-status');
+  const failMsg = msg => { status.textContent = msg; status.className = 'small text-danger'; };
+  const body = {
+    date: form.querySelector('.cc-date').value,
+    description: form.querySelector('.cc-desc').value.trim(),
+    amount: form.querySelector('.cc-amount').value,
+    category: form.querySelector('.cc-cat').value.trim(),
+  };
+  if (!body.date) return failMsg('Pick a date.');
+  if (!body.description) return failMsg('What was bought? A short description is required.');
+  if (!(parseFloat(body.amount) > 0)) return failMsg('Enter an amount greater than zero.');
+  try {
+    await japi('/api/credit-cards/' + cardId + '/charges', 'POST', body);
+    await refreshApp();
+    setCcStatus(cardId, 'Charge added — it waits here until you pay the card.', 'text-success');
+  } catch (err) {
+    failMsg(err.message);
+  }
+});
+
+$('cc-pay-amount').addEventListener('input', updateCcPayPreview);
+$('cc-pay-save').addEventListener('click', saveCcPay);
+$('cc-charge-save').addEventListener('click', saveCcCharge);
 
 ['tx-filter-type', 'tx-filter-category', 'tx-from', 'tx-to'].forEach(id => {
   $(id).addEventListener('change', () => loadTransactions(true).catch(err => alert(err.message)));

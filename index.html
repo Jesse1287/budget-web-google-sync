@@ -118,6 +118,7 @@ body { background-color: #f8f9fa; }
                 <button class="btn btn-danger btn-sm" id="close-submit" type="submit">Close &amp; start new</button>
               </div>
             </div>
+            <div id="close-owed" class="small text-warning mt-2"></div>
           </div>
         </form>
       </div>
@@ -128,6 +129,7 @@ body { background-color: #f8f9fa; }
     <li class="nav-item"><a class="nav-link active" data-tab="categories" href="#">Categories</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="transactions" href="#">Transactions</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="savings" href="#">Savings</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="credit-cards" href="#">Credit Cards</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="review" href="#"><span id="review-name">Needs Review</span> (<span id="review-count">0</span>)</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="paychecks" href="#">Paychecks</a></li>
     <li class="nav-item"><a class="nav-link" data-tab="report" href="#">Report</a></li>
@@ -347,6 +349,23 @@ body { background-color: #f8f9fa; }
     </div>
   </div>
 
+  <div id="tab-credit-cards" class="d-none">
+    <div class="card mb-3">
+      <div class="card-body pb-2">
+        <h5 class="mb-1">Credit cards</h5>
+        <p class="text-muted small mb-2">Put card purchases here as they happen. Nothing on this page touches your budget yet — the money only leaves checking when you press <strong>Pay card</strong>, which sends one expense to <strong>Transactions</strong>. Tag a charge with the category it belongs to (Food, Gas…) and the payment lands there; leave it untagged and it goes to a <strong>Credit Card</strong> category.</p>
+        <div id="cc-empty" class="d-none">
+          <div class="input-group input-group-sm" style="max-width:340px">
+            <input id="cc-new-name" class="form-control" placeholder="Card name, e.g. VISA">
+            <button id="cc-add" class="btn btn-primary" type="button">Add card</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="cc-cards"></div>
+    <datalist id="cc-cat-list"></datalist>
+  </div>
+
   <div id="tab-review" class="d-none">
     <div class="card">
       <div class="card-body p-2">
@@ -471,6 +490,8 @@ body { background-color: #f8f9fa; }
             <tr><td class="text-nowrap"><strong>Period</strong></td><td>The stretch of time you are budgeting for, like this month.</td></tr>
             <tr><td class="text-nowrap"><strong>Savings account</strong></td><td>Money at your bank that is <em>outside</em> the checking budget. It has its own page and is not part of the Balance badge.</td></tr>
             <tr><td class="text-nowrap"><strong>Set aside</strong></td><td>Moving money into the Savings <em>category</em> while it is still in checking, so it is ready to transfer to the account.</td></tr>
+            <tr><td class="text-nowrap"><strong>Transfer</strong></td><td>Moving money from one category to another. The total does not change — only which box holds the money.</td></tr>
+            <tr><td class="text-nowrap"><strong>Credit card charge</strong></td><td>Something bought on a card. It sits on the Credit Cards tab until you pay the card; only then does it become an expense in the budget.</td></tr>
           </tbody>
         </table>
       </div>
@@ -526,6 +547,19 @@ body { background-color: #f8f9fa; }
       <div class="card-body">
         <p class="small text-muted mb-2">Plans change mid-month. If Food needs more and Fun has extra, open <strong>Categories</strong> and use <strong>Move money between categories</strong>: pick the box the money comes <em>from</em> and the box it goes <em>to</em>, type the amount, and click <strong>Move</strong>. The preview shows both boxes before you commit, and warns if the move puts one of them in the red.</p>
         <p class="small text-muted mb-0">The total does not change — the money just moves from one box to another. The move appears on the <strong>Transactions</strong> tab as a pair, and <strong>Undo</strong> is offered for a few seconds. After that, a wrong move is fixed by deleting the pair (the × next to it) and moving the money back.</p>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header bg-white"><h6 class="mb-0">Credit cards: charges wait here until you pay the card</h6></div>
+      <div class="card-body">
+        <p class="small text-muted mb-2">A card purchase does not take money out of checking that day, so it does not belong in the budget yet. Type it on the <strong>Credit Cards</strong> tab instead:</p>
+        <ol class="small text-muted mb-2 ps-3">
+          <li><strong>Add the charge</strong> — date, what it was, how much. Optionally tag it with the category it belongs to (Food, Gas…). Nothing on the Categories tab changes.</li>
+          <li><strong>Tag it if you can</strong> — when you pay the card, tagged money is taken out of that category, so the envelopes stay honest. Untagged money goes to a <strong>Credit Card</strong> category, which will show a negative balance: that is the app telling you card spending was never planned for.</li>
+          <li><strong>Pay card</strong> — when the statement arrives, type what you are paying (a part is fine). The app sends one expense to <strong>Transactions</strong>, marks the oldest charges paid, and the Balance badge drops by that amount.</li>
+        </ol>
+        <p class="small text-muted mb-0">Charges are paid oldest first, so a part payment clears the oldest ones. Deleting the payment from <strong>Transactions</strong> puts the charges back to unpaid — the card and the budget always agree. An unpaid card carries into the next period and waits there.</p>
       </div>
     </div>
 
@@ -637,6 +671,65 @@ body { background-color: #f8f9fa; }
       <div class="modal-footer">
         <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
         <button class="btn btn-primary btn-sm" id="edit-save">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="cc-pay-modal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title" id="cc-pay-title">Pay card</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p id="cc-pay-help" class="small text-muted"></p>
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label small mb-0">Amount to pay</label>
+            <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="cc-pay-amount">
+          </div>
+          <div class="col-6">
+            <label class="form-label small mb-0">Date</label>
+            <input type="date" class="form-control form-control-sm" id="cc-pay-date">
+          </div>
+        </div>
+        <div id="cc-pay-preview" class="small mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="cc-pay-save">Send to transactions</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="cc-charge-modal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Edit charge</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label small mb-0">Date</label>
+            <input type="date" class="form-control form-control-sm" id="cc-charge-date">
+          </div>
+          <div class="col-6">
+            <label class="form-label small mb-0">Amount</label>
+            <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="cc-charge-amount">
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-0">What</label>
+            <input type="text" class="form-control form-control-sm" id="cc-charge-desc">
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-0">Category (optional)</label>
+            <input type="text" class="form-control form-control-sm" id="cc-charge-cat" list="cc-cat-list" placeholder="Leave empty for \"Credit Card\"">
+          </div>
+        </div>
+        <div id="cc-charge-status" class="small mt-2"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="cc-charge-save">Save</button>
       </div>
     </div>
   </div>

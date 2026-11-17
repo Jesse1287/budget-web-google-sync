@@ -6,6 +6,20 @@
 
 const PARENT_MARKER = '__split__';
 const DEFAULT_REVIEW = 'Needs Review';
+// Card charges that were never tagged with a real category all land here when
+// the card is paid, so an untagged statement still shows up as one honest
+// expense instead of vanishing.
+const CC_CATEGORY = 'Credit Card';
+// Rows the app writes itself to keep a pair or a ledger balanced. The generic
+// editor and the split dialog must leave them alone: editing one leg would
+// split the pair, and editing a savings/card row would leave its ledger row
+// disagreeing with the budget. Deleting the head is the way to undo one.
+const SYS_ROW_LABEL = {
+    transfer: 'transfer',
+    cc_payment: 'card payment',
+    savings: 'savings move',
+    savings_withdrawal: 'savings move',
+};
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS paychecks (
@@ -47,7 +61,33 @@ CREATE TABLE IF NOT EXISTS savings_events (
     tx_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS credit_cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS credit_card_charges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id INTEGER NOT NULL REFERENCES credit_cards(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    description TEXT NOT NULL,
+    amount REAL NOT NULL CHECK (amount > 0),
+    category TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- The payment log records money that was applied to a card. tx_id is
+-- deliberately not a foreign key: period close wipes transaction detail, and
+-- the card must not suddenly look unpaid again after a close.
+CREATE TABLE IF NOT EXISTS cc_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id INTEGER NOT NULL REFERENCES credit_cards(id) ON DELETE CASCADE,
+    tx_id INTEGER,
+    date TEXT NOT NULL,
+    amount REAL NOT NULL CHECK (amount > 0)
+);
 CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(date);
+CREATE INDEX IF NOT EXISTS idx_cc_charge ON credit_card_charges(card_id, date, id);
+CREATE INDEX IF NOT EXISTS idx_cc_payment ON cc_payments(card_id, date, id);
 CREATE INDEX IF NOT EXISTS idx_txn_cat ON transactions(category);
 CREATE INDEX IF NOT EXISTS idx_txn_dedup ON transactions(date, description, amount, category, type, source);
 `;
@@ -290,6 +330,7 @@ const Backend = {
         const rows = this.qAll(
             "SELECT description, category FROM transactions " +
             "WHERE type='expense' AND category != ? AND category != ? AND LENGTH(description) > 0 " +
+            "AND source NOT IN ('transfer', 'cc_payment', 'savings', 'savings_withdrawal') " +
             "GROUP BY lower(description), category ORDER BY COUNT(*) DESC, MAX(id) DESC",
             [rev, PARENT_MARKER]);
         for (const r of rows) {
@@ -490,6 +531,255 @@ const Backend = {
         return date;
     },
 
+    // ---- credit cards (charges live here until the card is paid) ----
+    // Nothing on this page touches the budget: a charge is a note that money
+    // was put on a card. Only "Pay card" turns charges into a real expense,
+    // because that is the moment money actually leaves checking.
+    //
+    // What is paid is derived, never stored: payments are replayed in
+    // (date, id) order against charges in (date, id) order, so deleting a
+    // payment transaction (which deletes its log row) makes the charges show
+    // as unpaid again without any bookkeeping to repair.
+    _ccCharges(cardId) {
+        return this.qAll('SELECT * FROM credit_card_charges WHERE card_id=? ORDER BY date, id', [cardId])
+            .map(c => ({
+                id: c.id,
+                date: c.date,
+                description: c.description,
+                amount: round2(c.amount),
+                category: c.category || '',
+                cents: Math.round(round2(c.amount) * 100),
+                paidC: 0,
+                paid_date: null,
+            }));
+    },
+
+    _ccPayments(cardId) {
+        return this.qAll('SELECT * FROM cc_payments WHERE card_id=? ORDER BY date, id', [cardId])
+            .map(p => ({ date: p.date, cents: Math.round(round2(p.amount) * 100) }));
+    },
+
+    // Oldest charge first, oldest payment first. Returns how many cents each
+    // payment consumed from which charge, so both the card list and the payment
+    // preview run exactly the same walk.
+    _ccConsume(charges, payments) {
+        const used = [];
+        let ci = 0;
+        let leftC = charges.length ? charges[0].cents : 0;
+        for (const p of payments) {
+            let payC = p.cents;
+            while (payC > 0 && ci < charges.length) {
+                if (leftC <= 0) {
+                    ci += 1;
+                    leftC = ci < charges.length ? charges[ci].cents : 0;
+                    continue;
+                }
+                const take = Math.min(payC, leftC);
+                used.push({ idx: ci, cents: take, date: p.date });
+                payC -= take;
+                leftC -= take;
+            }
+        }
+        return used;
+    },
+
+    _ccState(cardId) {
+        const charges = this._ccCharges(cardId);
+        const used = this._ccConsume(charges, this._ccPayments(cardId));
+        used.forEach(u => {
+            const c = charges[u.idx];
+            c.paidC += u.cents;
+            if (c.paidC >= c.cents) c.paid_date = u.date;
+        });
+        const totalC = charges.reduce((s, c) => s + c.cents, 0);
+        const paidC = charges.reduce((s, c) => s + c.paidC, 0);
+        return { charges: charges, totalC: totalC, paidC: paidC, owedC: Math.max(0, totalC - paidC) };
+    },
+
+    // Which categories a payment of `amountC` cents would debit, grouped the
+    // way the payment transaction is split. A tag that no longer names a real
+    // category falls back to "Credit Card" instead of resurrecting a retired
+    // name or draining the review bucket (which has no balance to drain).
+    _ccGroups(cardId, amountC) {
+        const st = this._ccState(cardId);
+        const appliedC = Math.min(amountC, st.owedC);
+        if (appliedC <= 0) throw new Error('nothing is owed on this card');
+        const full = new Set(this.activeCategories());
+        const cents = {};
+        let left = appliedC;
+        for (const c of st.charges) {
+            if (left <= 0) break;
+            const free = c.cents - c.paidC;
+            if (free <= 0) continue;
+            const take = Math.min(left, free);
+            const key = (c.category && full.has(c.category)) ? c.category : CC_CATEGORY;
+            cents[key] = (cents[key] || 0) + take;
+            left -= take;
+        }
+        // Rounding safety net: cents are integers, so this only fires if the
+        // records somehow disagree — put the leftover on the biggest group so
+        // the split always sums to the payment to the cent.
+        if (left > 0) {
+            const keys = Object.keys(cents);
+            const biggest = keys.sort((a, b) => cents[b] - cents[a])[0];
+            if (biggest) cents[biggest] += left;
+        }
+        const groups = Object.keys(cents)
+            .map(k => ({ category: k, amount: round2(cents[k] / 100) }))
+            .sort((a, b) => b.amount - a.amount);
+        return { appliedC: appliedC, groups: groups };
+    },
+
+    creditCards() {
+        return this.qAll('SELECT * FROM credit_cards ORDER BY id').map(c => {
+            const st = this._ccState(c.id);
+            const last = this.q1('SELECT MAX(date) AS d FROM cc_payments WHERE card_id=?', [c.id]);
+            return {
+                id: c.id,
+                name: c.name,
+                owed: round2(st.owedC / 100),
+                paid_total: round2(st.paidC / 100),
+                last_payment_date: last && last.d ? last.d : null,
+                charges: st.charges.map(ch => ({
+                    id: ch.id,
+                    date: ch.date,
+                    description: ch.description,
+                    amount: ch.amount,
+                    category: ch.category,
+                    paid: round2(ch.paidC / 100),
+                    status: ch.paidC <= 0 ? 'unpaid' : (ch.paidC >= ch.cents ? 'paid' : 'partial'),
+                    paid_date: ch.paid_date,
+                })),
+            };
+        });
+    },
+
+    _ccCard(cardId) {
+        const card = this.q1('SELECT * FROM credit_cards WHERE id=?', [cardId]);
+        if (!card) throw new Error('that credit card is no longer here');
+        return card;
+    },
+
+    _ccPreview(cardId, amount) {
+        this._ccCard(cardId);
+        const amtC = Math.round(round2(parseFloat(amount)) * 100);
+        if (!Number.isFinite(amtC) || amtC <= 0) throw new Error('amount must be greater than zero');
+        const st = this._ccState(cardId);
+        if (amtC > st.owedC) throw new Error('only $' + (st.owedC / 100).toFixed(2) + ' is owed on this card');
+        const g = this._ccGroups(cardId, amtC);
+        return { amount: round2(g.appliedC / 100), owed: round2(st.owedC / 100), groups: g.groups, remaining: round2((st.owedC - g.appliedC) / 100) };
+    },
+
+    _ccCreateCard(d) {
+        const name = String(d.name || '').trim() || 'Credit card';
+        this.run('INSERT INTO credit_cards (name) VALUES (?)', [name]);
+        return { id: this.lastInsertId(), name: name };
+    },
+
+    _ccRenameCard(cardId, d) {
+        const card = this._ccCard(cardId);
+        const name = String(d.name !== undefined ? d.name : card.name).trim();
+        if (!name) throw new Error('the card needs a name');
+        this.run('UPDATE credit_cards SET name=? WHERE id=?', [name, cardId]);
+        return { id: cardId, name: name };
+    },
+
+    _ccDeleteCard(cardId) {
+        this._ccCard(cardId);
+        const st = this._ccState(cardId);
+        if (st.owedC > 0) throw new Error('pay the card off before deleting it — $' + (st.owedC / 100).toFixed(2) + ' is still owed');
+        this.run('DELETE FROM credit_cards WHERE id=?', [cardId]);
+        return { status: 'ok' };
+    },
+
+    _ccAddCharge(cardId, d) {
+        this._ccCard(cardId);
+        const date = this._dateField(d.date);
+        const description = String(d.description || '').trim();
+        if (!description) throw new Error('what was bought? a short description is required');
+        const amount = round2(parseFloat(d.amount));
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount must be greater than zero');
+        const category = String(d.category || '').trim();
+        this.run('INSERT INTO credit_card_charges (card_id, date, description, amount, category) VALUES (?,?,?,?,?)',
+            [cardId, date, description, amount, category || null]);
+        return { id: this.lastInsertId() };
+    },
+
+    _ccUpdateCharge(cardId, chargeId, d) {
+        this._ccCard(cardId);
+        const row = this.q1('SELECT * FROM credit_card_charges WHERE id=? AND card_id=?', [chargeId, cardId]);
+        if (!row) throw new Error('that charge is no longer here');
+        // Once a payment has consumed part of a charge, the charge is history:
+        // editing it would silently change what the payment meant.
+        const st = this._ccState(cardId);
+        const mine = st.charges.find(c => c.id === chargeId);
+        if (mine && mine.paidC > 0) throw new Error('this charge is already (partly) paid — it cannot be changed any more');
+        const updates = {};
+        if (d.date !== undefined) updates.date = this._dateField(d.date);
+        if (d.description !== undefined) {
+            const desc = String(d.description || '').trim();
+            if (!desc) throw new Error('description cannot be empty');
+            updates.description = desc;
+        }
+        if (d.amount !== undefined) {
+            const amt = round2(parseFloat(d.amount));
+            if (!Number.isFinite(amt) || amt <= 0) throw new Error('amount must be greater than zero');
+            updates.amount = amt;
+        }
+        if (d.category !== undefined) updates.category = String(d.category || '').trim() || null;
+        const fields = Object.keys(updates);
+        if (!fields.length) throw new Error('no fields to update');
+        this.run('UPDATE credit_card_charges SET ' + fields.map(f => f + '=?').join(', ') + ' WHERE id=?',
+            fields.map(f => updates[f]).concat([chargeId]));
+        return { id: chargeId };
+    },
+
+    _ccDeleteCharge(cardId, chargeId) {
+        this._ccCard(cardId);
+        const st = this._ccState(cardId);
+        const mine = st.charges.find(c => c.id === chargeId);
+        if (!mine) throw new Error('that charge is no longer here');
+        if (mine.paidC > 0) throw new Error('this charge is already (partly) paid — delete the payment instead');
+        this.run('DELETE FROM credit_card_charges WHERE id=? AND card_id=?', [chargeId, cardId]);
+        return { status: 'ok' };
+    },
+
+    // Paying the card is the only moment money leaves checking: one expense
+    // (split per tag when there is more than one group) for exactly the amount
+    // applied, plus a log row that marks the charges paid.
+    _ccPay(cardId, d) {
+        const card = this._ccCard(cardId);
+        const date = this._dateField(d.date);
+        const amtC = Math.round(round2(parseFloat(d.amount)) * 100);
+        if (!Number.isFinite(amtC) || amtC <= 0) throw new Error('amount must be greater than zero');
+        const st = this._ccState(cardId);
+        if (st.owedC <= 0) throw new Error('nothing is owed on this card');
+        if (amtC > st.owedC) throw new Error('only $' + (st.owedC / 100).toFixed(2) + ' is owed on this card');
+        const g = this._ccGroups(cardId, amtC);
+        const amount = round2(g.appliedC / 100);
+        const description = 'Credit card payment — ' + card.name;
+
+        let txId;
+        if (g.groups.length === 1) {
+            this.run('INSERT INTO transactions (date, description, amount, category, type, source) VALUES (?,?,?,?,?,?)',
+                [date, description, -amount, g.groups[0].category, 'expense', 'cc_payment']);
+            txId = this.lastInsertId();
+        } else {
+            this.run('INSERT INTO transactions (date, description, amount, category, type, source) VALUES (?,?,?,?,?,?)',
+                [date, description, -amount, PARENT_MARKER, 'expense', 'cc_payment']);
+            txId = this.lastInsertId();
+            this._applySplit(txId, g.groups.map(x => [x.amount, x.category]), 'cc_payment');
+        }
+        this.run('INSERT INTO cc_payments (card_id, tx_id, date, amount) VALUES (?,?,?,?)',
+            [cardId, txId, date, amount]);
+        return {
+            txId: txId,
+            amount: amount,
+            groups: g.groups,
+            remaining: round2((st.owedC - g.appliedC) / 100),
+        };
+    },
+
     paychecks() {
         const rows = this.qAll('SELECT * FROM paychecks ORDER BY id');
         return rows.map(pk => {
@@ -541,7 +831,7 @@ const Backend = {
         const qi = route.indexOf('?');
         if (qi >= 0) {
             const sp = new URLSearchParams(route.slice(qi + 1));
-            for (const k of ['type', 'category', 'q', 'date_from', 'date_to', 'limit', 'offset', 'month']) {
+            for (const k of ['type', 'category', 'q', 'date_from', 'date_to', 'limit', 'offset', 'month', 'amount']) {
                 if (sp.has(k)) query[k] = sp.get(k);
             }
             route = route.slice(0, qi);
@@ -557,8 +847,10 @@ const Backend = {
             else if (route === 'report') result = this.report(query.month || '');
             else if (route === 'paychecks') result = this.paychecks();
             else if (route === 'savings') result = this.savings();
+            else if (route === 'credit-cards') result = this.creditCards();
             else if (route === 'config') result = this.cfg();
             else if (seg[0] === 'transactions' && seg[2] === 'parts') result = this.transactionParts(parseInt(seg[1], 10));
+            else if (seg[0] === 'credit-cards' && seg[2] === 'preview') result = this._ccPreview(parseInt(seg[1], 10), query.amount);
             else throw new Error('unknown route: ' + route);
         } else if (method === 'POST') {
             if (route === 'transactions') result = this._addTransaction(body);
@@ -569,7 +861,10 @@ const Backend = {
             else if (route === 'savings/deposit') result = this._savingsDeposit(body);
             else if (route === 'savings/withdraw') result = this._savingsWithdraw(body);
             else if (route === 'savings/adjust') result = this._savingsAdjust(body);
+            else if (route === 'credit-cards') result = this._ccCreateCard(body);
             else if (seg[0] === 'transactions' && seg[2] === 'split') result = this._splitTransaction(parseInt(seg[1], 10), body);
+            else if (seg[0] === 'credit-cards' && seg[2] === 'charges') result = this._ccAddCharge(parseInt(seg[1], 10), body);
+            else if (seg[0] === 'credit-cards' && seg[2] === 'pay') result = this._ccPay(parseInt(seg[1], 10), body);
             else if (seg[0] === 'categories' && seg[1] === 'merge') result = this._mergeCategory(body.from, body.to);
             else if (seg[0] === 'categories' && seg[1] === 'from-data') result = this._seedCategoriesFromData();
             else if (route === 'config') result = this._saveConfig(body);
@@ -579,11 +874,15 @@ const Backend = {
             if (seg[0] === 'transactions') result = this._updateTransaction(parseInt(seg[1], 10), body);
             else if (seg[0] === 'paychecks') result = this._updatePaycheck(parseInt(seg[1], 10), body);
             else if (route === 'savings') result = this._savingsPatch(body);
+            else if (seg[0] === 'credit-cards' && seg[2] === 'charges') result = this._ccUpdateCharge(parseInt(seg[1], 10), parseInt(seg[3], 10), body);
+            else if (seg[0] === 'credit-cards') result = this._ccRenameCard(parseInt(seg[1], 10), body);
             else throw new Error('unknown route: ' + route);
             this._dirty();
         } else if (method === 'DELETE') {
             if (seg[0] === 'transactions') result = this._deleteTransaction(parseInt(seg[1], 10));
             else if (seg[0] === 'paychecks') result = this._deletePaycheck(parseInt(seg[1], 10));
+            else if (seg[0] === 'credit-cards' && seg[2] === 'charges') result = this._ccDeleteCharge(parseInt(seg[1], 10), parseInt(seg[3], 10));
+            else if (seg[0] === 'credit-cards') result = this._ccDeleteCard(parseInt(seg[1], 10));
             else throw new Error('unknown route: ' + route);
             this._dirty();
         } else throw new Error('unsupported method: ' + method);
@@ -660,12 +959,31 @@ const Backend = {
         return { id, from, to, amount };
     },
 
+    // The shared core of "turn this transaction into a split": drop the old
+    // parts, mark the head, insert one leg per part. Used by the manual split
+    // route and by the card payment, which must produce identical rows.
+    _applySplit(id, parts, source) {
+        const row = this.q1('SELECT * FROM transactions WHERE id=?', [id]);
+        if (!row) throw new Error('not found');
+        const sign = row.type === 'expense' ? -1 : 1;
+        const childType = row.type === 'expense' ? 'expense' : 'allocation';
+        this.run('DELETE FROM transactions WHERE parent_id=?', [id]);
+        this.run('UPDATE transactions SET category=? WHERE id=?', [PARENT_MARKER, id]);
+        for (const [amt, cat] of parts) {
+            this.run('INSERT INTO transactions (date, description, amount, category, type, source, parent_id) VALUES (?,?,?,?,?,?,?)',
+                [row.date, row.description, sign * amt, cat, childType, source || row.source, id]);
+        }
+        return { status: 'ok', parts: parts.length };
+    },
+
     _splitTransaction(id, d) {
         const parts = d.parts || [];
         if (!parts.length) throw new Error('parts is required');
         const row = this.q1('SELECT * FROM transactions WHERE id=?', [id]);
         if (!row) throw new Error('not found');
         if (row.type === 'allocation') throw new Error('allocations cannot be split');
+        if (SYS_ROW_LABEL[row.source]) throw new Error('this row is part of a ' + SYS_ROW_LABEL[row.source] +
+            ' — delete it and do it again instead of splitting it');
         const original = Math.abs(row.amount);
         const cleaned = [];
         for (const p of parts) {
@@ -678,15 +996,7 @@ const Backend = {
         if (Math.abs(cleaned.reduce((s, a) => s + a[0], 0) - original) > 0.01) {
             throw new Error('parts must sum to ' + original.toFixed(2));
         }
-        this.run('DELETE FROM transactions WHERE parent_id=?', [id]);
-        this.run('UPDATE transactions SET category=? WHERE id=?', [PARENT_MARKER, id]);
-        const sign = row.type === 'expense' ? -1 : 1;
-        const childType = row.type === 'expense' ? 'expense' : 'allocation';
-        for (const [amt, cat] of cleaned) {
-            this.run('INSERT INTO transactions (date, description, amount, category, type, source, parent_id) VALUES (?,?,?,?,?,?,?)',
-                [row.date, row.description, sign * amt, cat, childType, 'manual', id]);
-        }
-        return { status: 'ok', parts: cleaned.length };
+        return this._applySplit(id, cleaned, 'manual');
     },
 
     _deleteTransaction(id) {
@@ -697,6 +1007,11 @@ const Backend = {
         // close wipes transactions but the account history must survive.)
         if (row && !row.parent_id && (row.source === 'savings' || row.source === 'savings_withdrawal')) {
             this.run('DELETE FROM savings_events WHERE tx_id=?', [id]);
+        }
+        // A card payment owns a log row. Delete it too, so the charges it
+        // consumed show as unpaid again — the card and the budget never drift.
+        if (row && !row.parent_id && row.source === 'cc_payment') {
+            this.run('DELETE FROM cc_payments WHERE tx_id=?', [id]);
         }
         this.run('DELETE FROM transactions WHERE parent_id=?', [id]);
         this.run('DELETE FROM transactions WHERE id=?', [id]);
@@ -715,6 +1030,14 @@ const Backend = {
     _updateTransaction(id, d) {
         const row = this.q1('SELECT * FROM transactions WHERE id=?', [id]);
         if (!row) throw new Error('not found');
+        // Rows the app writes to keep a pair or a ledger balanced (a transfer,
+        // a card payment, a savings move) must not be reshaped by the generic
+        // editor: editing one leg splits the pair, and editing a savings row
+        // leaves its account event disagreeing. Delete it and redo it.
+        if (SYS_ROW_LABEL[row.source]) {
+            throw new Error('this row is part of a ' + SYS_ROW_LABEL[row.source] +
+                ' — delete it and do it again instead of editing it');
+        }
         const updates = {};
 
         if (d.amount !== undefined && d.amount !== null) {
@@ -945,6 +1268,9 @@ const Backend = {
 
         this.run('UPDATE transactions SET category=? WHERE category=?', [dst, src]);
         this.run('UPDATE paycheck_allocations SET category=? WHERE category=?', [dst, src]);
+        // A card charge tag is a category reference too: after this merge, the
+        // next payment for that charge must land in the surviving category.
+        this.run('UPDATE credit_card_charges SET category=? WHERE category=?', [dst, src]);
 
         // A saved check that paid both names now has two lines for the same
         // category: fold them into one so the split still shows once.
@@ -1008,6 +1334,7 @@ const Backend = {
         if (next.review_category !== cur.review_category) {
             this.run('UPDATE transactions SET category=? WHERE category=?', [next.review_category, cur.review_category]);
             this.run('UPDATE paycheck_allocations SET category=? WHERE category=?', [next.review_category, cur.review_category]);
+            this.run('UPDATE credit_card_charges SET category=? WHERE category=?', [next.review_category, cur.review_category]);
             // The savings pointer should never be the review bucket, but if an
             // imported file says otherwise, keep it consistent instead of
             // leaving it on a name that no longer exists.
