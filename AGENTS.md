@@ -4,13 +4,13 @@ Zero-based envelope budgeting PWA. **No backend**: Google Drive holds the durabl
 
 ## Stack
 
-Plain JS, no bundler. `index.html` loads bootstrap@5.3.0 + sql.js@1.10.3 from the jsDelivr CDN, then `backend.js` → `drive.js` → `app.js` (all with `?v=17` cache-busting). `drive.js` lazily loads `https://accounts.google.com/gsi/client` itself, so there is no extra script tag to manage.
+Plain JS, no bundler. `index.html` loads bootstrap@5.3.0 + sql.js@1.10.3 from the jsDelivr CDN, then `backend.js` → `drive.js` → `app.js` (all with `?v=18` cache-busting). `drive.js` lazily loads `https://accounts.google.com/gsi/client` itself, so there is no extra script tag to manage.
 
 - `index.html` — UI (Bootstrap 5)
 - `app.js` — frontend behavior + two-way Drive sync orchestration
 - `backend.js` — SQL.js (WASM SQLite) data layer; `budget.db` is a plain SQLite file
 - `drive.js` — Google sign-in (Google Identity Services token model) and Drive sync
-- `manifest.json` / `sw.js` — PWA; service-worker cache is named `roux-budget-web-v17`
+- `manifest.json` / `sw.js` — PWA; service-worker cache is named `roux-budget-web-v18`
 - `icons/` — PWA icons
 - `reference/` — **gitignored**, local-only copy of the old Flask/Docker version, kept for reference; never deployed
 
@@ -38,6 +38,18 @@ Personal financial data (`budget.db`) is intentionally **not** in this repositor
 - Every delete offers Undo for 12 s, implemented by restoring a DB snapshot taken right before the mutation.
 - First sign-in: an existing local budget is uploaded once (never silently overwritten). A new device opens the budget already in Drive; a Drive that cannot be read shows "Try again", never "start a new budget".
 - New-period workflow: saves, downloads a local `.db` copy, uploads a period backup to Drive, then carries envelope balances forward (negatives included).
+
+## Data model — the parts that are easy to break
+
+All of this lives inside `budget.db`, so Drive sync, conflict handling, backups and snapshot Undo need no changes. `_migrate()` runs the whole `SCHEMA` on every load and every statement is `CREATE ... IF NOT EXISTS`, which is how an older Drive file gains a table a newer version added — so **never drop or rename a table or column**; old and new devices must be able to share one file during a release.
+
+- **Transfers are a split-shaped pair, not a table.** Head `allocation` +X under `__split__`, child +X destination, child −X source; all three rows carry `source='transfer'`. `summary()` then moves the money between envelopes and the total is unchanged, and the existing split rendering groups the three rows.
+- **`savings_events`** is the bank savings account, outside the checking budget. Signed `amount`, `kind` in `deposit|withdrawal|adjust`, `tx_id` points at the transaction that carried the money. The account balance is `SUM(amount)`, never cached. `savings_category` (the staging envelope in checking) and `savings_account_name` live in the `app_config` JSON.
+- **`credit_cards`, `credit_card_charges`, `cc_payments`** hold card spending until the card is paid. `owed = max(0, charges − payments)` comes from a FIFO replay of the payment log, never from a cached `paid_amount`; a charge may only be edited/deleted while no payment has consumed it.
+- **`cc_payments.tx_id` and `savings_events.tx_id` are deliberately not foreign keys.** Period close wipes `transactions`, and a cascade would erase the payment/savings history — the card would look unpaid again and the savings balance would vanish. Both ledgers must outlive transaction detail; `_deleteTransaction` removes the matching ledger row when its transaction is deleted.
+- **System rows are read-only.** Rows with `source` in `transfer`, `cc_payment`, `savings`, `savings_withdrawal` are refused by `_updateTransaction` and `_splitTransaction` (and render without ✎ in the Transactions tab). Editing one leg would unbalance a pair or desync a ledger; delete the head and redo it.
+- **Category references beyond `transactions`.** `_mergeCategory` and the review-category rename in `_saveConfig` rewrite `credit_card_charges.category` and follow `savings_category`; a charge tag that names a category which no longer exists falls back to "Credit Card" at payment time instead of resurrecting it.
+- **Report vs summary.** `report()` excludes `source='savings'` from spending and `source='savings_withdrawal'` from received, and returns `savings: { to, from }`. `summary()` is intentionally untouched — a deposit must still debit the Savings envelope so "Ready to move" goes down.
 
 ## Run locally
 
