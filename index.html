@@ -15,15 +15,16 @@
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
-body { background-color: #f8f9fa; }
+body { background-color: var(--bs-tertiary-bg); }
 .card { border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,.08); }
-.nav-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.nav-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; position: sticky; top: 0; z-index: 1020; background: var(--bs-body-bg); }
 .nav-tabs .nav-link { cursor: pointer; white-space: nowrap; }
-.neg { color: #b02a37; }
-.pos { color: #1e7e34; }
-.tx-child td { background: #faf9f7; border-top-style: dotted; }
-.over { background: #fdecea; }
-.cat-select { max-width: 160px; }
+.neg { color: var(--bs-danger); }
+.pos { color: var(--bs-success); }
+.tx-child td { background: var(--bs-secondary-bg); border-top-style: dotted; }
+.over { background: rgba(176,42,55,.12); }
+.cat-select { max-width: none; }
+.tx-cat { max-width: 190px; }
 .pk-row.pk-unnamed .pk-cat-name { border-color: #fd7e14; box-shadow: 0 0 0 .15rem rgba(253,126,0.25); }
 .table td, .table th { font-size: .9rem; }
 .table td, .table th { font-variant-numeric: tabular-nums; }
@@ -33,9 +34,57 @@ body { background-color: #f8f9fa; }
 .env-chips .badge { font-weight: normal; }
 summary { cursor: pointer; }
 details > summary { list-style-position: inside; }
+
+/* loading bar */
+#loading-bar { position: fixed; top: 0; left: 0; right: 0; height: 3px; background: var(--bs-primary); transform: scaleX(0); transform-origin: 0 50%; opacity: 0; z-index: 1080; transition: transform .45s ease, opacity .2s ease; }
+#loading-bar.on { opacity: 1; transform: scaleX(.8); }
+#loading-bar.done { transform: scaleX(1); opacity: 0; }
+
+/* the phone layout */
+.mobile-nav { display: none; }
+@media (max-width: 767.98px) {
+  body { padding-bottom: calc(58px + env(safe-area-inset-bottom)); }
+  .nav-tabs { display: none; }
+  .mobile-nav {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 1030;
+    background: var(--bs-body-bg); border-top: 1px solid var(--bs-border-color);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .mobile-nav button {
+    flex: 1 1 0; min-width: 0; border: 0; background: none; padding: .5rem .15rem .4rem;
+    font-size: .64rem; line-height: 1.1; color: var(--bs-secondary-color);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mobile-nav button.active { color: var(--bs-primary); font-weight: 600; }
+  .mobile-nav button:focus-visible { outline: 2px solid var(--bs-primary); outline-offset: -2px; }
+
+  /* transactions become cards instead of a five-column table */
+  .tx-table, .tx-table tbody { display: block; }
+  .tx-table thead { display: none; }
+  .tx-table tr {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .5rem;
+    padding: .55rem .7rem; margin-bottom: .5rem;
+    border: 1px solid var(--bs-border-color); border-radius: .7rem;
+  }
+  .tx-table td { display: block; border: 0 !important; padding: 0 !important; }
+  .tx-table td:empty { display: none; }
+  .tx-table td:nth-child(1) { order: 3; flex: 0 0 auto; font-size: .75rem; color: var(--bs-secondary-color); }
+  .tx-table td:nth-child(2) { order: 1; flex: 1 1 55%; font-weight: 600; word-break: break-word; }
+  .tx-table td:nth-child(3) { order: 4; flex: 1 1 100%; }
+  .tx-table td:nth-child(4) { order: 2; flex: 0 0 auto; margin-left: auto; font-weight: 600; }
+  .tx-table td:nth-child(5) { order: 5; flex: 1 1 100%; }
+  .tx-table td.tx-actions { display: flex; gap: .35rem; justify-content: flex-end; }
+  .tx-table td.tx-empty { order: 1; flex: 1 1 100%; }
+  .tx-table tr.tx-child { padding-left: 1.4rem; }
+  .tx-cat { max-width: none; width: 100%; }
+  .tx-actions .btn { padding: .25rem .55rem; }
+  #undo-toast, #update-banner { bottom: calc(58px + env(safe-area-inset-bottom)) !important; }
+}
+#app.d-none ~ .mobile-nav { display: none !important; }
 </style>
 </head>
 <body>
+<div id="loading-bar" aria-hidden="true"></div>
 
 <div id="landing" class="container py-5 d-none">
   <div class="row justify-content-center">
@@ -73,6 +122,9 @@ details > summary { list-style-position: inside; }
 <input type="file" id="import-input" accept=".db,.sqlite,.sqlite3,application/octet-stream" class="d-none">
 
 <div id="app" class="container-fluid py-3 d-none" style="max-width:1200px">
+  <div id="offline-bar" class="alert alert-secondary py-1 px-2 small d-none" role="status">
+    Offline — this device keeps your changes and syncs them when the connection is back.
+  </div>
   <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <div class="d-flex gap-2 align-items-center flex-wrap">
       <span class="badge bg-primary fs-6">Balance <span id="balance"></span></span>
@@ -247,22 +299,37 @@ details > summary { list-style-position: inside; }
   </div>
 
   <div id="tab-transactions" class="d-none">
-    <div class="d-flex gap-2 mb-2 flex-wrap">
-      <select id="tx-filter-type" class="form-select form-select-sm" style="width:auto">
-        <option value="expense">Expenses</option>
-        <option value="income">Income</option>
-        <option value="transfer">Transfers</option>
-        <option value="all">All</option>
-      </select>
-      <select id="tx-filter-category" class="form-select form-select-sm cat-select"></select>
-      <input type="search" id="tx-search" class="form-control form-control-sm" placeholder="Search description" style="max-width:220px">
-      <input type="date" id="tx-from" class="form-control form-control-sm" style="max-width:160px">
-      <input type="date" id="tx-to" class="form-control form-control-sm" style="max-width:160px">
+    <div class="row g-2 mb-2 align-items-end">
+      <div class="col-6 col-md-2">
+        <label class="form-label small mb-0" for="tx-filter-type">Type</label>
+        <select id="tx-filter-type" class="form-select form-select-sm">
+          <option value="expense">Expenses</option>
+          <option value="income">Income</option>
+          <option value="transfer">Transfers</option>
+          <option value="all">All</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label class="form-label small mb-0" for="tx-filter-category">Category</label>
+        <select id="tx-filter-category" class="form-select form-select-sm cat-select"></select>
+      </div>
+      <div class="col-12 col-md-3">
+        <label class="form-label small mb-0" for="tx-search">Search</label>
+        <input type="search" id="tx-search" class="form-control form-control-sm" placeholder="Description">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label small mb-0" for="tx-from">From</label>
+        <input type="date" id="tx-from" class="form-control form-control-sm">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label small mb-0" for="tx-to">To</label>
+        <input type="date" id="tx-to" class="form-control form-control-sm">
+      </div>
     </div>
     <div class="card">
       <div class="card-body p-2">
         <div class="table-responsive">
-          <table class="table table-sm table-hover mb-0">
+          <table class="table table-sm table-hover mb-0 tx-table">
             <thead><tr><th>Date</th><th>Description</th><th>Category</th><th class="text-end">Amount</th><th></th></tr></thead>
             <tbody id="tx-body"></tbody>
           </table>
@@ -467,6 +534,19 @@ details > summary { list-style-position: inside; }
       <div class="col-lg-6">
         <div class="card h-100">
           <div class="card-body">
+            <h5>Display</h5>
+            <p class="text-muted small">The phone layout puts the tabs along the bottom and turns the transaction table into cards, so the category is readable instead of squeezed.</p>
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" role="switch" id="theme-dark">
+              <label class="form-check-label" for="theme-dark">Dark mode</label>
+            </div>
+            <p class="small text-muted mt-1 mb-0">Follows your device until you flip this once.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
             <h5>Data</h5>
             <p class="text-muted small">Google Drive is the durable copy; this browser keeps a fast local cache so the app works even before Drive is reachable. Downloading gives a point-in-time <code>.db</code> copy; importing replaces the budget on all your devices with a file you pick.</p>
             <div class="d-flex gap-2 flex-wrap">
@@ -477,7 +557,7 @@ details > summary { list-style-position: inside; }
               <button id="data-new" class="btn btn-outline-danger btn-sm">Start fresh</button>
             </div>
             <p class="small text-muted mt-2 mb-0">Import is for a <code>budget.db</code> from another copy of this app — an older version, or a different Google account. The file is checked first, the budget you have now is copied to Google Drive, and only then is it replaced.</p>
-            <p class="small text-muted mt-1 mb-0">App version 21</p>
+            <p class="small text-muted mt-1 mb-0">App version 22</p>
           </div>
         </div>
       </div>
@@ -638,6 +718,31 @@ details > summary { list-style-position: inside; }
   <span id="undo-msg" class="small"></span>
   <button class="btn btn-sm btn-light" id="undo-btn">Undo</button>
   <button class="btn btn-sm btn-link text-white text-decoration-none" id="undo-close" aria-label="Dismiss">×</button>
+</div>
+
+<nav class="mobile-nav" aria-label="Main tabs">
+  <button type="button" data-tab="overview" class="active">Overview</button>
+  <button type="button" data-tab="categories">Budget</button>
+  <button type="button" data-tab="transactions">Activity</button>
+  <button type="button" data-tab="credit-cards">Cards</button>
+  <button type="button" data-more="1">More</button>
+</nav>
+
+<div class="offcanvas offcanvas-bottom" tabindex="-1" id="more-tabs" aria-labelledby="more-tabs-title">
+  <div class="offcanvas-header">
+    <h5 class="offcanvas-title" id="more-tabs-title">More</h5>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body pt-0">
+    <div class="d-grid gap-2">
+      <button type="button" class="btn btn-outline-secondary" data-tab="savings">Savings</button>
+      <button type="button" class="btn btn-outline-secondary" data-tab="review">Needs Review (<span id="review-count-m">0</span>)</button>
+      <button type="button" class="btn btn-outline-secondary" data-tab="paychecks">Paychecks</button>
+      <button type="button" class="btn btn-outline-secondary" data-tab="report">Report</button>
+      <button type="button" class="btn btn-outline-secondary" data-tab="settings">Settings</button>
+      <button type="button" class="btn btn-outline-secondary" data-tab="help">Help</button>
+    </div>
+  </div>
 </div>
 
 <div id="update-banner" class="d-none position-fixed bottom-0 end-0 m-3 p-2 bg-primary text-white rounded shadow" style="z-index:1080">
@@ -806,8 +911,8 @@ details > summary { list-style-position: inside; }
 <script>window.SQLJS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-<script src="backend.js?v=21"></script>
-<script src="drive.js?v=21"></script>
-<script src="app.js?v=21"></script>
+<script src="backend.js?v=22"></script>
+<script src="drive.js?v=22"></script>
+<script src="app.js?v=22"></script>
 </body>
 </html>

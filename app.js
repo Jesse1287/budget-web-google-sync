@@ -1,7 +1,53 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const api = (path, opts) => Backend.api(path, opts);
 const japi = (path, method, body) => api(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+// ---- loading bar: only shows when a call is slow enough to notice ----
+let loadCount = 0, loadTimer = null;
+function beginLoad() {
+  loadCount++;
+  if (loadCount === 1) {
+    loadTimer = setTimeout(() => {
+      const bar = $('loading-bar');
+      if (bar) { bar.classList.remove('done'); bar.classList.add('on'); }
+    }, 250);
+  }
+}
+function endLoad() {
+  loadCount = Math.max(0, loadCount - 1);
+  if (loadCount === 0) {
+    clearTimeout(loadTimer);
+    const bar = $('loading-bar');
+    if (bar) { bar.classList.remove('on'); bar.classList.add('done'); }
+  }
+}
+const api = (path, opts) => {
+  beginLoad();
+  return Backend.api(path, opts).finally(endLoad);
+};
+
+// ---- theme: stored choice, otherwise follow the device ----
+function applyTheme(dark) {
+  document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
+  const box = $('theme-dark');
+  if (box) box.checked = !!dark;
+}
+function storedTheme() {
+  try { return localStorage.getItem('roux.theme'); } catch (e) { return null; }
+}
+function initTheme() {
+  const stored = storedTheme();
+  const dark = stored ? stored === 'dark' : !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  applyTheme(dark);
+}
+
+// ---- offline note ----
+function updateOnline() {
+  const el = $('offline-bar');
+  if (el) el.classList.toggle('d-none', navigator.onLine !== false);
+}
+window.addEventListener('online', updateOnline);
+window.addEventListener('offline', updateOnline);
 const fmt = n => { if (n === null || n === undefined) return '—'; const v = Number(n); return (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -608,6 +654,8 @@ async function loadSummary() {
   const s = await api('/api/summary');
   $('balance').textContent = fmt(s.balance);
   $('review-count').textContent = s.needs_review.length;
+  const rc2 = $('review-count-m');
+  if (rc2) rc2.textContent = s.needs_review.length;
   $('envelope-body').innerHTML = s.envelopes.map(e => {
     const over = e.available !== null && e.available < 0;
     const cls = over ? 'over' : '';
@@ -754,7 +802,7 @@ async function loadTransactions(reset) {
   txOffset += rows.length;
   if (rows.length < 100) txDone = true;
   if (!rows.length) {
-    if (reset) $('tx-body').innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3">Nothing here yet. Add one with the form above, or change the filter.</td></tr>';
+    if (reset) $('tx-body').innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3 tx-empty">Nothing here yet. Add one with the form above, or change the filter.</td></tr>';
     return;
   }
 
@@ -784,18 +832,18 @@ async function loadTransactions(reset) {
       ? `<td class="small text-muted">${esc(headLabel(t))}</td>`
       : readOnly
         ? `<td>${esc(t.category)}</td>`
-        : `<td><select class="form-select form-select-sm tx-cat" data-id="${t.id}" style="max-width:160px">${catOpts(t.category)}</select>${t.category === REVIEW_CAT && hint ? `<div class="mt-1"><button class="btn btn-outline-info btn-sm tx-hint" data-id="${t.id}" data-cat="${esc(hint)}" title="Suggested from past purchases">→ ${esc(hint)}</button></div>` : ''}</td>`;
+        : `<td><select class="form-select form-select-sm tx-cat" data-id="${t.id}">${catOpts(t.category)}</select>${t.category === REVIEW_CAT && hint ? `<div class="mt-1"><button class="btn btn-outline-info btn-sm tx-hint" data-id="${t.id}" data-cat="${esc(hint)}" title="Suggested from past purchases">→ ${esc(hint)}</button></div>` : ''}</td>`;
     const editAmt = t.type === 'expense' ? Math.abs(t.amount) : t.amount;
     const canSplit = !readOnly && t.type !== 'allocation' && (parent ? t.type === 'expense' : true);
     const split = canSplit ? `<button class="btn btn-outline-secondary btn-sm tx-split" data-id="${t.id}" data-desc="${esc(t.description)}" data-amt="${Math.abs(t.amount)}">Split</button>` : '';
     const edit = readOnly ? '' : `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${parent ? '' : esc(t.category)}" data-t="${t.type}" data-head="${parent ? 1 : 0}" title="Edit">✎</button>`;
-    return `<tr><td>${t.date}</td><td>${esc(t.description)}</td>${catCell}<td class="text-end ${sign}">${parent ? '<strong>' + fmt(t.amount) + '</strong>' : fmt(t.amount)}</td><td class="text-end">${edit}${split}<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" data-src="${esc(t.source)}" title="Delete" aria-label="Delete">×</button></td></tr>`;
+    return `<tr><td>${t.date}</td><td>${esc(t.description)}</td>${catCell}<td class="text-end ${sign}">${parent ? '<strong>' + fmt(t.amount) + '</strong>' : fmt(t.amount)}</td><td class="text-end tx-actions">${edit}${split}<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" data-src="${esc(t.source)}" title="Delete" aria-label="Delete">×</button></td></tr>`;
   };
   const childHtml = k => {
     const sign = k.amount < 0 ? 'neg' : 'pos';
     const editAmt = k.type === 'expense' ? Math.abs(k.amount) : k.amount;
     const edit = sysRow(k.source) ? '' : `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${k.id}" data-d="${k.date}" data-n="${esc(k.description)}" data-a="${editAmt}" data-c="${esc(k.category)}" data-t="${k.type}" data-head="0" title="Edit">✎</button>`;
-    return `<tr class="tx-child"><td></td><td class="ps-4">↳ <span class="text-muted">${esc(k.category)}</span></td><td></td><td class="text-end ${sign}">${fmt(k.amount)}</td><td class="text-end">${edit}</td></tr>`;
+    return `<tr class="tx-child"><td></td><td class="ps-4">↳ <span class="text-muted">${esc(k.category)}</span></td><td></td><td class="text-end ${sign}">${fmt(k.amount)}</td><td class="text-end tx-actions">${edit}</td></tr>`;
   };
   const orphanHtml = t => {
     const sign = t.amount < 0 ? 'neg' : 'pos';
@@ -806,7 +854,7 @@ async function loadTransactions(reset) {
       : `<td><select class="form-select form-select-sm tx-cat" data-id="${t.id}">${catOpts(t.category)}</select></td>`;
     const edit = readOnly ? '' : `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${t.id}" data-d="${t.date}" data-n="${esc(t.description)}" data-a="${editAmt}" data-c="${esc(t.category)}" data-t="${t.type}" data-head="0" title="Edit">✎</button>`;
     const del = readOnly ? '' : `<button class="btn btn-outline-danger btn-sm tx-del" data-id="${t.id}" title="Delete" aria-label="Delete">×</button>`;
-    return `<tr class="tx-child"><td>${t.date}</td><td class="ps-4">↳ <span class="text-muted">part of a split not on this page</span></td>${catCell}<td class="text-end ${sign}">${fmt(t.amount)}</td><td class="text-end">${edit}${del}</td></tr>`;
+    return `<tr class="tx-child"><td>${t.date}</td><td class="ps-4">↳ <span class="text-muted">part of a split not on this page</span></td>${catCell}<td class="text-end ${sign}">${fmt(t.amount)}</td><td class="text-end tx-actions">${edit}${del}</td></tr>`;
   };
 
   let html = '';
@@ -831,15 +879,12 @@ function wireTxBody() {
     try {
       if (btn.classList.contains('tx-del')) {
         const src = btn.dataset.src;
-        const ask = src === 'savings'
-          ? 'Delete this move to the savings account? The account balance goes back down by that amount.'
-          : src === 'savings_withdrawal'
-            ? 'Delete this move from the savings account? The account balance goes back up by that amount.'
-            : 'Delete this transaction?';
-        if (!confirm(ask)) return;
+        const label = src === 'savings' ? 'Move to savings deleted — the account moved back.'
+          : src === 'savings_withdrawal' ? 'Move from savings deleted — the account moved back.'
+            : 'Transaction deleted.';
         const snapshot = Backend.exportBinary();
         await japi('/api/transactions/' + btn.dataset.id, 'DELETE');
-        offerUndo('Transaction deleted.', snapshot);
+        offerUndo(label, snapshot);
         await refreshApp();
       }
       if (btn.classList.contains('tx-hint')) {
@@ -1149,7 +1194,6 @@ function pkStatus(st, type, msg) {
 async function pkDelete(card) {
   const id = card.dataset.id;
   const st = card.querySelector('.pk-status');
-  if (!confirm('Delete this check template? Envelope balances keep their current totals.')) return;
   const btn = card.querySelector('.pk-del');
   btn.disabled = true;
   try {
@@ -1268,6 +1312,13 @@ async function loadReport() {
   const m = $('report-month').value;
   if (!m) return;
   const s = await api('/api/report?month=' + encodeURIComponent(m));
+  const hasMoney = s.received || s.spent || (s.savings && (s.savings.to || s.savings.from)) || (s.income_detail || []).length || (s.expenses || []).length;
+  if (!hasMoney) {
+    $('report-body').innerHTML = '<div class="card"><div class="card-body text-center py-4">' +
+      '<p class="mb-1 fw-semibold">Nothing recorded for this month yet.</p>' +
+      '<p class="text-muted small mb-0">Income and expenses you add on the Transactions tab show up here.</p></div></div>';
+    return;
+  }
   const rows = amts => amts.length
     ? amts.map(x => `<tr><td>${esc(x.category || x.name || '')}</td><td class="text-end">${fmt(x.amount)}</td></tr>`).join('')
     : '<tr><td class="text-muted" colspan="2">None.</td></tr>';
@@ -1791,13 +1842,27 @@ function setCloseStatus(msg, cls) {
 const r2 = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 function goTab(name) {
-  const link = document.querySelector('.nav-tabs .nav-link[data-tab="' + name + '"]');
-  if (link) link.click();
+  showTab(name);
+}
+
+function sparkline(points) {
+  const vals = points.map(p => p.net);
+  const w = 600, h = 90, pad = 8;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = (max - min) || 1;
+  const x = i => pad + (i * (w - 2 * pad)) / Math.max(1, vals.length - 1);
+  const y = v => h - pad - ((v - min) / span) * (h - 2 * pad);
+  const d = vals.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ',' + y(v).toFixed(1)).join(' ');
+  const zero = (min < 0 && max > 0)
+    ? '<line x1="' + pad + '" x2="' + (w - pad) + '" y1="' + y(0).toFixed(1) + '" y2="' + y(0).toFixed(1) + '" stroke="var(--bs-border-color)" stroke-dasharray="4 4"/>'
+    : '';
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="90" preserveAspectRatio="none" role="img" aria-label="Net worth by month">' +
+    zero + '<path d="' + d + '" fill="none" stroke="var(--bs-primary)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>';
 }
 
 async function loadOverview() {
-  const [s, savings, cards] = await Promise.all([
-    api('/api/summary'), api('/api/savings'), api('/api/credit-cards'),
+  const [s, savings, cards, history] = await Promise.all([
+    api('/api/summary'), api('/api/savings'), api('/api/credit-cards'), api('/api/net-worth'),
   ]);
   let rep = null;
   try { rep = await api('/api/report?month=' + encodeURIComponent(localMonth())); } catch (e) { rep = null; }
@@ -1931,6 +1996,21 @@ async function loadOverview() {
           </div>
         </div>
       </div>
+    </div>
+
+    <div class="card mt-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-1 flex-wrap gap-2">
+          <h6 class="mb-0">Net worth trend</h6>
+          <span class="small text-muted">${history.length} month${history.length === 1 ? '' : 's'} on record</span>
+        </div>
+        ${history.length > 1
+          ? sparkline(history.slice(-12)) + '<div class="d-flex justify-content-between small text-muted mt-1">'
+            + '<span>' + esc(history[0].month) + ' · ' + fmt(history[0].net) + '</span>'
+            + '<span>' + esc(history[history.length - 1].month) + ' · ' + fmt(history[history.length - 1].net) + '</span>'
+            + '</div>'
+          : '<p class="small text-muted mb-0">A point is saved each month, and again when you close a period. Once there are two, the trend appears here.</p>'}
+      </div>
     </div>`;
 }
 
@@ -1963,6 +2043,12 @@ async function enterApp() {
   await saveNow();
   await updateDataBar();
   showApp();
+  // One point per month for the trend line: only when this month has none yet,
+  // so opening the app does not push a new copy to Drive every time.
+  try {
+    const hist = await api('/api/net-worth');
+    if (!hist.some(h => h.month === localMonth())) await japi('/api/net-worth/capture', 'POST', {});
+  } catch (e) { /* the overview simply shows fewer points */ }
   await refreshApp();
   startSyncPolling();
   maybeDailyBackup();
@@ -2190,26 +2276,59 @@ $('close-date').value = localDate();
 $('report-month').value = localMonth();
 $('transfer-date').value = localDate();
 
+// ---- display preferences ----
+initTheme();
+updateOnline();
+$('theme-dark').addEventListener('change', () => {
+  const dark = $('theme-dark').checked;
+  applyTheme(dark);
+  try { localStorage.setItem('roux.theme', dark ? 'dark' : 'light'); } catch (e) {}
+});
+
+const TAB_NAMES = ['overview', 'categories', 'transactions', 'savings', 'credit-cards', 'review', 'paychecks', 'report', 'settings', 'help'];
+
+async function showTab(name) {
+  if (!TAB_NAMES.includes(name)) return;
+  document.querySelectorAll('.nav-tabs .nav-link').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
+  document.querySelectorAll('.mobile-nav button[data-tab]').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
+  TAB_NAMES.forEach(t => {
+    const el = $('tab-' + t);
+    if (el) el.classList.toggle('d-none', t !== name);
+  });
+  $('add-panel').classList.toggle('d-none', name !== 'transactions');
+  try {
+    if (name === 'overview') await loadOverview();
+    if (name === 'transactions') { await loadTransactions(true); await loadIncomeChecks(); }
+    if (name === 'savings') await loadSavings();
+    if (name === 'credit-cards') await loadCreditCards();
+    if (name === 'paychecks') { await loadPaychecks(); await loadIncomeChecks(); }
+    if (name === 'review') await loadReview();
+    if (name === 'report') { if ($('report-month').value) await loadReport(); }
+    if (name === 'settings') await loadSettings();
+  } catch (err) { alert(err.message); }
+}
+
 document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
-  a.addEventListener('click', async e => {
-    e.preventDefault();
-    document.querySelectorAll('.nav-tabs .nav-link').forEach(x => x.classList.remove('active'));
-    a.classList.add('active');
-    ['overview', 'categories', 'transactions', 'savings', 'credit-cards', 'review', 'paychecks', 'report', 'settings', 'help'].forEach(t => {
-      const el = $('tab-' + t);
-      if (el) el.classList.toggle('d-none', t !== a.dataset.tab);
-    });
-    $('add-panel').classList.toggle('d-none', a.dataset.tab !== 'transactions');
-    try {
-      if (a.dataset.tab === 'overview') await loadOverview();
-      if (a.dataset.tab === 'transactions') { await loadTransactions(true); await loadIncomeChecks(); }
-      if (a.dataset.tab === 'savings') await loadSavings();
-      if (a.dataset.tab === 'credit-cards') await loadCreditCards();
-      if (a.dataset.tab === 'paychecks') { await loadPaychecks(); await loadIncomeChecks(); }
-      if (a.dataset.tab === 'review') await loadReview();
-      if (a.dataset.tab === 'report') { if ($('report-month').value) await loadReport(); }
-      if (a.dataset.tab === 'settings') await loadSettings();
-    } catch (err) { alert(err.message); }
+  a.addEventListener('click', e => { e.preventDefault(); showTab(a.dataset.tab); });
+});
+
+// Bottom bar (phones) and its "More" sheet, wired to the same tabs.
+document.querySelectorAll('.mobile-nav button[data-tab]').forEach(b => {
+  b.addEventListener('click', () => showTab(b.dataset.tab));
+});
+
+let moreSheet = null;
+const moreBtn = document.querySelector('.mobile-nav button[data-more]');
+if (moreBtn) {
+  moreBtn.addEventListener('click', () => {
+    if (!moreSheet) moreSheet = new bootstrap.Offcanvas($('more-tabs'));
+    moreSheet.show();
+  });
+}
+document.querySelectorAll('#more-tabs [data-tab]').forEach(b => {
+  b.addEventListener('click', () => {
+    if (moreSheet) moreSheet.hide();
+    showTab(b.dataset.tab);
   });
 });
 
@@ -2502,17 +2621,16 @@ $('cc-cards').addEventListener('click', async e => {
       setCcStatus(cardId, 'Name saved.', 'text-success');
     } else if (btn.classList.contains('cc-del-card')) {
       const card = (ccData || []).find(c => c.id === cardId);
-      if (!confirm('Delete the card "' + (card ? card.name : '') + '" and its charge history?')) return;
+      const cardName = card ? card.name : 'Card';
       const snapshot = Backend.exportBinary();
       await japi('/api/credit-cards/' + cardId, 'DELETE');
-      offerUndo('Card deleted.', snapshot);
+      offerUndo('Card \u201c' + cardName + '\u201d deleted.', snapshot);
       await refreshApp();
     } else if (btn.classList.contains('cc-edit')) {
       openCcCharge(cardId, Number(btn.dataset.charge));
     } else if (btn.classList.contains('cc-split')) {
       openCcSplit(cardId, Number(btn.dataset.charge));
     } else if (btn.classList.contains('cc-del-charge')) {
-      if (!confirm('Delete this charge?')) return;
       const snapshot = Backend.exportBinary();
       await japi('/api/credit-cards/' + cardId + '/charges/' + btn.dataset.charge, 'DELETE');
       offerUndo('Charge deleted.', snapshot);
@@ -2781,7 +2899,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=21', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=22', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };

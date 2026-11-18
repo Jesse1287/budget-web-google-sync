@@ -93,6 +93,15 @@ CREATE TABLE IF NOT EXISTS cc_payments (
     date TEXT NOT NULL,
     amount REAL NOT NULL CHECK (amount > 0)
 );
+-- One point per month so the Overview can show a trend. Captured when the
+-- month is first opened and again when the period is closed.
+CREATE TABLE IF NOT EXISTS net_worth_history (
+    month TEXT PRIMARY KEY,
+    checking REAL NOT NULL,
+    savings REAL NOT NULL,
+    debt REAL NOT NULL,
+    captured_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_cc_charge ON credit_card_charges(card_id, date, id);
 CREATE INDEX IF NOT EXISTS idx_cc_payment ON cc_payments(card_id, date, id);
@@ -870,6 +879,41 @@ const Backend = {
         };
     },
 
+    // ---- net worth history (one point per month) ----
+    _netWorthNow(month) {
+        const checking = this.summary().balance;
+        const savings = this.q1('SELECT COALESCE(SUM(amount),0) AS t FROM savings_events').t;
+        let debt = 0;
+        for (const c of this.qAll('SELECT id FROM credit_cards')) {
+            debt += this._ccState(c.id).owedC / 100;
+        }
+        return {
+            month: month || todayISO().slice(0, 7),
+            checking: round2(checking),
+            savings: round2(savings),
+            debt: round2(debt),
+            net: round2(checking + savings - debt),
+        };
+    },
+
+    captureNetWorth() {
+        const point = this._netWorthNow();
+        this.run('INSERT OR REPLACE INTO net_worth_history (month, checking, savings, debt, captured_at) VALUES (?,?,?,?,?)',
+            [point.month, point.checking, point.savings, point.debt, nowISO()]);
+        return point;
+    },
+
+    netWorthHistory() {
+        return this.qAll('SELECT month, checking, savings, debt, captured_at FROM net_worth_history ORDER BY month')
+            .map(r => ({
+                month: r.month,
+                checking: round2(r.checking),
+                savings: round2(r.savings),
+                debt: round2(r.debt),
+                net: round2(r.checking + r.savings - r.debt),
+            }));
+    },
+
     paychecks() {
         const rows = this.qAll('SELECT * FROM paychecks ORDER BY id');
         return rows.map(pk => {
@@ -938,6 +982,7 @@ const Backend = {
             else if (route === 'paychecks') result = this.paychecks();
             else if (route === 'savings') result = this.savings();
             else if (route === 'credit-cards') result = this.creditCards();
+            else if (route === 'net-worth') result = this.netWorthHistory();
             else if (route === 'config') result = this.cfg();
             else if (seg[0] === 'transactions' && seg[2] === 'parts') result = this.transactionParts(parseInt(seg[1], 10));
             else if (seg[0] === 'credit-cards' && seg[2] === 'preview') result = this._ccPreview(parseInt(seg[1], 10), query.amount);
@@ -952,6 +997,7 @@ const Backend = {
             else if (route === 'savings/withdraw') result = this._savingsWithdraw(body);
             else if (route === 'savings/adjust') result = this._savingsAdjust(body);
             else if (route === 'credit-cards') result = this._ccCreateCard(body);
+            else if (route === 'net-worth/capture') result = this.captureNetWorth();
             else if (seg[0] === 'transactions' && seg[2] === 'split') result = this._splitTransaction(parseInt(seg[1], 10), body);
             else if (seg[0] === 'credit-cards' && seg[2] === 'charges') result = this._ccAddCharge(parseInt(seg[1], 10), body);
             else if (seg[0] === 'credit-cards' && seg[2] === 'pay') result = this._ccPay(parseInt(seg[1], 10), body);
@@ -1239,6 +1285,8 @@ const Backend = {
             this.run("INSERT INTO transactions (date, description, amount, category, type, source) VALUES (?,?,?,?,?,?)",
                 [date, 'Carryover', val, cat, 'allocation', 'carryover']);
         }
+        // Remember where the month ended, for the overview trend.
+        this.captureNetWorth();
         return { status: 'ok', backup: '(see Drive backup)' };
     },
 
