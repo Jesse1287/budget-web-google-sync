@@ -47,7 +47,7 @@ let undoState = null;         // DB snapshot offered as "Undo" after a delete
 let undoTimer = null;
 let dailyBackupTried = '';
 let idbPromise = null;
-let splitModal, editModal, savingsModal, ccPayModal, ccChargeModal;
+let splitModal, editModal, savingsModal, ccPayModal, ccChargeModal, ccSplitModal;
 let splitTargetId = null;
 let editTarget = null;
 let savingsData = null;
@@ -55,6 +55,7 @@ let savingsMode = 'deposit';
 let ccData = [];
 let ccPayCard = null;
 let ccEditTarget = null;
+let ccSplitTarget = null;
 
 function openIDB() {
   if (!idbPromise) {
@@ -524,8 +525,6 @@ function fillCategorySelects() {
   $('add-category').innerHTML = opts;
   $('tx-filter-category').innerHTML = '<option value="">All categories</option>' + opts;
   $('pk-envelopes').innerHTML = categories.map(c => `<option value="${esc(c)}">`).join('');
-  const ccList = $('cc-cat-list');
-  if (ccList) ccList.innerHTML = categories.filter(c => c !== REVIEW_CAT).map(c => `<option value="${esc(c)}">`).join('');
   fillMergeSelects();
   fillTransferSelects();
 }
@@ -1480,10 +1479,20 @@ function setCcStatus(cardId, msg, cls) {
   el.className = 'small ' + (cls || 'text-muted');
 }
 
+// Category pickers on the card page use the same list as the checking tabs.
+function ccCatOptions(selected) {
+  const list = categories.filter(c => c !== REVIEW_CAT);
+  return '<option value="">— none (goes to "Credit Card") —</option>' +
+    list.map(c => `<option value="${esc(c)}" ${c === selected ? 'selected' : ''}>${esc(c)}</option>`).join('');
+}
+
 function ccChargeRow(cardId, ch) {
-  const tag = ch.category
-    ? `<span class="badge bg-light text-dark border">${esc(ch.category)}</span>`
-    : '<span class="text-muted">—</span>';
+  const split = (ch.parts || []).length > 0;
+  const tag = split
+    ? ch.parts.map(p => `<span class="badge bg-light text-dark border me-1 mb-1">${esc(p.category)} ${fmt(p.amount)}</span>`).join('')
+    : (ch.category
+        ? `<span class="badge bg-light text-dark border">${esc(ch.category)}</span>`
+        : '<span class="text-muted">—</span>');
   const status = ch.status === 'paid'
     ? 'Paid' + (ch.paid_date ? ' ' + ch.paid_date : '')
     : ch.status === 'partial'
@@ -1491,6 +1500,7 @@ function ccChargeRow(cardId, ch) {
       : 'Unpaid';
   const actions = ch.status === 'unpaid'
     ? `<button class="btn btn-outline-secondary btn-sm cc-edit" data-card="${cardId}" data-charge="${ch.id}" title="Edit">✎</button>
+       <button class="btn btn-outline-secondary btn-sm cc-split" data-card="${cardId}" data-charge="${ch.id}" title="${split ? 'Edit the split' : 'Split across categories'}">Split</button>
        <button class="btn btn-outline-danger btn-sm cc-del-charge" data-card="${cardId}" data-charge="${ch.id}" title="Delete" aria-label="Delete">×</button>`
     : '<span class="small text-muted">history</span>';
   return `<tr><td class="text-nowrap">${ch.date}</td><td>${esc(ch.description)}</td><td>${tag}</td>` +
@@ -1535,8 +1545,8 @@ function ccCardHtml(c) {
           <input type="number" step="0.01" min="0.01" class="form-control form-control-sm cc-amount" placeholder="0.00" required>
         </div>
         <div class="col-4 col-md-3">
-          <label class="form-label small mb-0">Category (optional)</label>
-          <input type="text" class="form-control form-control-sm cc-cat" list="cc-cat-list" placeholder="Food, Gas…">
+          <label class="form-label small mb-0">Category</label>
+          <select class="form-select form-select-sm cc-cat">${ccCatOptions('')}</select>
         </div>
         <div class="col-4 col-md-2 d-grid">
           <button class="btn btn-outline-primary btn-sm" type="submit">Add charge</button>
@@ -1636,11 +1646,16 @@ function openCcCharge(cardId, chargeId) {
     return;
   }
   ccEditTarget = { cardId: cardId, chargeId: chargeId };
+  const split = (ch.parts || []).length > 0;
   $('cc-charge-date').value = ch.date;
   $('cc-charge-amount').value = Number(ch.amount).toFixed(2);
+  $('cc-charge-amount').readOnly = split;
   $('cc-charge-desc').value = ch.description;
-  $('cc-charge-cat').value = ch.category || '';
-  $('cc-charge-status').textContent = '';
+  $('cc-charge-cat').innerHTML = ccCatOptions(ch.category || '');
+  $('cc-charge-cat-wrap').classList.toggle('d-none', split);
+  $('cc-charge-status').textContent = split
+    ? 'This charge is split across categories — use the Split button on its row to change the parts.'
+    : '';
   ccChargeModal.show();
 }
 
@@ -1651,12 +1666,12 @@ async function saveCcCharge() {
   const body = {
     date: $('cc-charge-date').value,
     description: $('cc-charge-desc').value.trim(),
-    amount: $('cc-charge-amount').value,
-    category: $('cc-charge-cat').value.trim(),
   };
+  if (!$('cc-charge-amount').readOnly) body.amount = $('cc-charge-amount').value;
+  if (!$('cc-charge-cat-wrap').classList.contains('d-none')) body.category = $('cc-charge-cat').value;
   if (!body.date) return failMsg('Pick a date.');
   if (!body.description) return failMsg('What was bought? A short description is required.');
-  if (!(parseFloat(body.amount) > 0)) return failMsg('Enter an amount greater than zero.');
+  if (body.amount !== undefined && !(parseFloat(body.amount) > 0)) return failMsg('Enter an amount greater than zero.');
   const target = ccEditTarget;
   $('cc-charge-save').disabled = true;
   try {
@@ -1668,6 +1683,77 @@ async function saveCcCharge() {
     failMsg(e.message);
   } finally {
     $('cc-charge-save').disabled = false;
+  }
+}
+
+// ---- split a charge across categories (same idea as splitting an expense) ----
+function openCcSplit(cardId, chargeId) {
+  const card = (ccData || []).find(c => c.id === cardId);
+  const ch = card && card.charges.find(x => x.id === chargeId);
+  if (!ch) return;
+  if (ch.status !== 'unpaid') {
+    alert('That charge is already (partly) paid, so it is history now. Delete the payment if it was wrong.');
+    return;
+  }
+  ccSplitTarget = { cardId: cardId, chargeId: chargeId, amount: ch.amount };
+  $('cc-split-desc').textContent = ch.description + ' — ' + fmt(ch.amount) + ' on ' + ch.date + '.';
+  $('cc-split-target').textContent = fmt(ch.amount);
+  $('cc-split-rows').innerHTML = '';
+  const rows = (ch.parts && ch.parts.length)
+    ? ch.parts
+    : [{ category: ch.category || '', amount: ch.amount }];
+  rows.forEach(p => addCcSplitRow(p.amount, p.category));
+  ccSplitTotal();
+  ccSplitModal.show();
+}
+
+function addCcSplitRow(amount, category) {
+  const one = document.querySelectorAll('#cc-split-rows .ccs-row').length === 0;
+  const div = document.createElement('div');
+  div.className = 'row g-2 mb-1 align-items-center ccs-row';
+  div.innerHTML = `<div class="col-4"><input type="number" step="0.01" min="0.01" class="form-control form-control-sm ccs-amt" value="${amount != null ? Number(amount).toFixed(2) : ''}" placeholder="0.00"></div>
+    <div class="col-7"><select class="form-select form-select-sm ccs-cat">${ccCatOptions(category || '')}</select></div>
+    <div class="col-1"><button type="button" class="btn btn-outline-danger btn-sm ccs-rm"${one ? ' disabled' : ''} title="Remove part">×</button></div>`;
+  div.querySelector('.ccs-rm').addEventListener('click', () => {
+    if (document.querySelectorAll('#cc-split-rows .ccs-row').length <= 1) return;
+    div.remove();
+    ccSplitTotal();
+  });
+  div.querySelectorAll('input,select').forEach(el => el.addEventListener('input', ccSplitTotal));
+  $('cc-split-rows').appendChild(div);
+  ccSplitTotal();
+}
+
+function ccSplitTotal() {
+  const totalC = [...document.querySelectorAll('#cc-split-rows .ccs-amt')]
+    .reduce((s, i) => s + Math.round((parseFloat(i.value) || 0) * 100), 0);
+  const targetC = ccSplitTarget ? Math.round(ccSplitTarget.amount * 100) : 0;
+  const el = $('cc-split-total');
+  el.textContent = fmt(totalC / 100);
+  el.className = totalC === targetC ? 'text-success fw-bold' : 'text-danger fw-bold';
+}
+
+async function saveCcSplit() {
+  if (!ccSplitTarget) return;
+  const rows = [...document.querySelectorAll('#cc-split-rows .ccs-row')].map(r => ({
+    amount: Math.round((parseFloat(r.querySelector('.ccs-amt').value) || 0) * 100) / 100,
+    category: r.querySelector('.ccs-cat').value,
+  }));
+  if (rows.some(r => !r.category)) {
+    alert('Pick a category for every part.');
+    return;
+  }
+  const target = ccSplitTarget;
+  $('cc-split-save').disabled = true;
+  try {
+    await japi('/api/credit-cards/' + target.cardId + '/charges/' + target.chargeId, 'PATCH', { parts: rows });
+    ccSplitModal.hide();
+    await refreshApp();
+    setCcStatus(target.cardId, 'Split saved.', 'text-success');
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    $('cc-split-save').disabled = false;
   }
 }
 
@@ -1942,6 +2028,7 @@ editModal = new bootstrap.Modal($('edit-modal'));
 savingsModal = new bootstrap.Modal($('savings-modal'));
 ccPayModal = new bootstrap.Modal($('cc-pay-modal'));
 ccChargeModal = new bootstrap.Modal($('cc-charge-modal'));
+ccSplitModal = new bootstrap.Modal($('cc-split-modal'));
 
 $('add-date').value = localDate();
 $('close-date').value = localDate();
@@ -2266,6 +2353,8 @@ $('cc-cards').addEventListener('click', async e => {
       await refreshApp();
     } else if (btn.classList.contains('cc-edit')) {
       openCcCharge(cardId, Number(btn.dataset.charge));
+    } else if (btn.classList.contains('cc-split')) {
+      openCcSplit(cardId, Number(btn.dataset.charge));
     } else if (btn.classList.contains('cc-del-charge')) {
       if (!confirm('Delete this charge?')) return;
       const snapshot = Backend.exportBinary();
@@ -2306,6 +2395,8 @@ $('cc-cards').addEventListener('submit', async e => {
 $('cc-pay-amount').addEventListener('input', updateCcPayPreview);
 $('cc-pay-save').addEventListener('click', saveCcPay);
 $('cc-charge-save').addEventListener('click', saveCcCharge);
+$('cc-split-add').addEventListener('click', () => addCcSplitRow(null, ''));
+$('cc-split-save').addEventListener('click', saveCcSplit);
 
 ['tx-filter-type', 'tx-filter-category', 'tx-from', 'tx-to'].forEach(id => {
   $(id).addEventListener('change', () => loadTransactions(true).catch(err => alert(err.message)));
@@ -2534,7 +2625,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=18', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=19', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };

@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS credit_card_charges (
     category TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- A charge can be split across categories (one store run: Food + Household).
+-- Parts must add up to the charge; a charge without parts uses its category.
+CREATE TABLE IF NOT EXISTS credit_card_charge_parts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    charge_id INTEGER NOT NULL REFERENCES credit_card_charges(id) ON DELETE CASCADE,
+    category TEXT NOT NULL,
+    amount REAL NOT NULL CHECK (amount > 0)
+);
 -- The payment log records money that was applied to a card. tx_id is
 -- deliberately not a foreign key: period close wipes transaction detail, and
 -- the card must not suddenly look unpaid again after a close.
@@ -88,6 +96,7 @@ CREATE TABLE IF NOT EXISTS cc_payments (
 CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_cc_charge ON credit_card_charges(card_id, date, id);
 CREATE INDEX IF NOT EXISTS idx_cc_payment ON cc_payments(card_id, date, id);
+CREATE INDEX IF NOT EXISTS idx_cc_part ON credit_card_charge_parts(charge_id, id);
 CREATE INDEX IF NOT EXISTS idx_txn_cat ON transactions(category);
 CREATE INDEX IF NOT EXISTS idx_txn_dedup ON transactions(date, description, amount, category, type, source);
 `;
@@ -549,9 +558,25 @@ const Backend = {
                 amount: round2(c.amount),
                 category: c.category || '',
                 cents: Math.round(round2(c.amount) * 100),
+                parts: this.qAll('SELECT * FROM credit_card_charge_parts WHERE charge_id=? ORDER BY id', [c.id])
+                    .map(p => ({
+                        id: p.id,
+                        category: p.category || '',
+                        amount: round2(p.amount),
+                        cents: Math.round(round2(p.amount) * 100),
+                    })),
                 paidC: 0,
                 paid_date: null,
             }));
+    },
+
+    // The (category, cents) pieces money is attributed to, in order. A split
+    // charge uses its parts; anything else is one piece carrying the charge's
+    // own tag. Stored order is the order money is consumed in, so a part payment
+    // pays the first categories on that charge first.
+    _chargeSlices(charge) {
+        if (!charge.parts.length) return [[charge.category, charge.cents]];
+        return charge.parts.map(p => [p.category, p.cents]);
     },
 
     _ccPayments(cardId) {
@@ -597,9 +622,10 @@ const Backend = {
     },
 
     // Which categories a payment of `amountC` cents would debit, grouped the
-    // way the payment transaction is split. A tag that no longer names a real
-    // category falls back to "Credit Card" instead of resurrecting a retired
-    // name or draining the review bucket (which has no balance to drain).
+    // way the payment transaction is split. A split charge contributes its parts
+    // in order; a tag that no longer names a real category falls back to "Credit
+    // Card" instead of resurrecting a retired name or draining the review
+    // bucket (which has no balance to drain).
     _ccGroups(cardId, amountC) {
         const st = this._ccState(cardId);
         const appliedC = Math.min(amountC, st.owedC);
@@ -611,10 +637,25 @@ const Backend = {
             if (left <= 0) break;
             const free = c.cents - c.paidC;
             if (free <= 0) continue;
-            const take = Math.min(left, free);
-            const key = (c.category && full.has(c.category)) ? c.category : CC_CATEGORY;
-            cents[key] = (cents[key] || 0) + take;
-            left -= take;
+            const planned = Math.min(left, free);
+            let remaining = planned;
+            // Skip the cents of this charge that earlier payments already took.
+            let skip = c.paidC;
+            for (const [cat, pcents] of this._chargeSlices(c)) {
+                if (remaining <= 0) break;
+                if (skip >= pcents) { skip -= pcents; continue; }
+                const take = Math.min(remaining, pcents - skip);
+                const key = (cat && full.has(cat)) ? cat : CC_CATEGORY;
+                cents[key] = (cents[key] || 0) + take;
+                remaining -= take;
+                skip = 0;
+            }
+            if (remaining > 0) {
+                // Only reachable if stored parts do not add up to their charge.
+                const key = (c.category && full.has(c.category)) ? c.category : CC_CATEGORY;
+                cents[key] = (cents[key] || 0) + remaining;
+            }
+            left -= planned;
         }
         // Rounding safety net: cents are integers, so this only fires if the
         // records somehow disagree — put the leftover on the biggest group so
@@ -646,6 +687,7 @@ const Backend = {
                     description: ch.description,
                     amount: ch.amount,
                     category: ch.category,
+                    parts: ch.parts.map(p => ({ category: p.category, amount: p.amount })),
                     paid: round2(ch.paidC / 100),
                     status: ch.paidC <= 0 ? 'unpaid' : (ch.paidC >= ch.cents ? 'paid' : 'partial'),
                     paid_date: ch.paid_date,
@@ -692,6 +734,40 @@ const Backend = {
         return { status: 'ok' };
     },
 
+    // Validate a charge's split: positive amounts, a category each, and parts
+    // that add up to the charge to the cent.
+    _cleanChargeParts(parts, amount) {
+        const cleaned = [];
+        for (const p of (parts || [])) {
+            const cat = String((p && p.category) || '').trim();
+            if (!cat) throw new Error('each part needs a category');
+            const amt = round2(parseFloat(p && p.amount));
+            if (!Number.isFinite(amt) || amt <= 0) throw new Error('each part needs a positive amount');
+            cleaned.push([cat, amt]);
+        }
+        if (!cleaned.length) throw new Error('parts cannot be empty');
+        const total = round2(cleaned.reduce((s, a) => s + a[1], 0));
+        if (Math.abs(total - amount) > 0.005) {
+            throw new Error('the parts must add up to $' + amount.toFixed(2) + ' (they add up to $' + total.toFixed(2) + ')');
+        }
+        return cleaned;
+    },
+
+    // Replace a charge's parts. A one-part split is just a tag, so it is stored
+    // as `category` with no part rows; anything else is stored as parts.
+    _storeChargeParts(chargeId, parts) {
+        this.run('DELETE FROM credit_card_charge_parts WHERE charge_id=?', [chargeId]);
+        if (parts.length === 1) {
+            this.run('UPDATE credit_card_charges SET category=? WHERE id=?', [parts[0][0], chargeId]);
+            return;
+        }
+        this.run('UPDATE credit_card_charges SET category=NULL WHERE id=?', [chargeId]);
+        for (const [cat, amt] of parts) {
+            this.run('INSERT INTO credit_card_charge_parts (charge_id, category, amount) VALUES (?,?,?)',
+                [chargeId, cat, amt]);
+        }
+    },
+
     _ccAddCharge(cardId, d) {
         this._ccCard(cardId);
         const date = this._dateField(d.date);
@@ -699,10 +775,13 @@ const Backend = {
         if (!description) throw new Error('what was bought? a short description is required');
         const amount = round2(parseFloat(d.amount));
         if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount must be greater than zero');
+        const parts = (d.parts !== undefined && d.parts !== null) ? this._cleanChargeParts(d.parts, amount) : null;
         const category = String(d.category || '').trim();
         this.run('INSERT INTO credit_card_charges (card_id, date, description, amount, category) VALUES (?,?,?,?,?)',
             [cardId, date, description, amount, category || null]);
-        return { id: this.lastInsertId() };
+        const chargeId = this.lastInsertId();
+        if (parts) this._storeChargeParts(chargeId, parts);
+        return { id: chargeId };
     },
 
     _ccUpdateCharge(cardId, chargeId, d) {
@@ -727,10 +806,21 @@ const Backend = {
             updates.amount = amt;
         }
         if (d.category !== undefined) updates.category = String(d.category || '').trim() || null;
+
+        let parts = null;
+        if (d.parts !== undefined && d.parts !== null) {
+            parts = this._cleanChargeParts(d.parts, updates.amount !== undefined ? updates.amount : round2(row.amount));
+            delete updates.category; // the parts carry the categories
+        } else if (d.amount !== undefined && mine && mine.parts.length) {
+            throw new Error('this charge is split — use Split to change the parts and their total');
+        }
         const fields = Object.keys(updates);
-        if (!fields.length) throw new Error('no fields to update');
-        this.run('UPDATE credit_card_charges SET ' + fields.map(f => f + '=?').join(', ') + ' WHERE id=?',
-            fields.map(f => updates[f]).concat([chargeId]));
+        if (!fields.length && !parts) throw new Error('no fields to update');
+        if (fields.length) {
+            this.run('UPDATE credit_card_charges SET ' + fields.map(f => f + '=?').join(', ') + ' WHERE id=?',
+                fields.map(f => updates[f]).concat([chargeId]));
+        }
+        if (parts) this._storeChargeParts(chargeId, parts);
         return { id: chargeId };
     },
 
@@ -1271,6 +1361,7 @@ const Backend = {
         // A card charge tag is a category reference too: after this merge, the
         // next payment for that charge must land in the surviving category.
         this.run('UPDATE credit_card_charges SET category=? WHERE category=?', [dst, src]);
+        this.run('UPDATE credit_card_charge_parts SET category=? WHERE category=?', [dst, src]);
 
         // A saved check that paid both names now has two lines for the same
         // category: fold them into one so the split still shows once.
