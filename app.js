@@ -654,8 +654,6 @@ async function loadSummary() {
   const s = await api('/api/summary');
   $('balance').textContent = fmt(s.balance);
   $('review-count').textContent = s.needs_review.length;
-  const rc2 = $('review-count-m');
-  if (rc2) rc2.textContent = s.needs_review.length;
   $('envelope-body').innerHTML = s.envelopes.map(e => {
     const over = e.available !== null && e.available < 0;
     const cls = over ? 'over' : '';
@@ -829,7 +827,7 @@ async function loadTransactions(reset) {
     const readOnly = sysRow(t.source);
     const hint = hints[t.description];
     const catCell = parent
-      ? `<td class="small text-muted">${esc(headLabel(t))}</td>`
+      ? `<td><span class="badge text-bg-light border">${esc(headLabel(t))}</span></td>`
       : readOnly
         ? `<td>${esc(t.category)}</td>`
         : `<td><select class="form-select form-select-sm tx-cat" data-id="${t.id}">${catOpts(t.category)}</select>${t.category === REVIEW_CAT && hint ? `<div class="mt-1"><button class="btn btn-outline-info btn-sm tx-hint" data-id="${t.id}" data-cat="${esc(hint)}" title="Suggested from past purchases">→ ${esc(hint)}</button></div>` : ''}</td>`;
@@ -843,7 +841,7 @@ async function loadTransactions(reset) {
     const sign = k.amount < 0 ? 'neg' : 'pos';
     const editAmt = k.type === 'expense' ? Math.abs(k.amount) : k.amount;
     const edit = sysRow(k.source) ? '' : `<button class="btn btn-outline-secondary btn-sm tx-edit" data-id="${k.id}" data-d="${k.date}" data-n="${esc(k.description)}" data-a="${editAmt}" data-c="${esc(k.category)}" data-t="${k.type}" data-head="0" title="Edit">✎</button>`;
-    return `<tr class="tx-child"><td></td><td class="ps-4">↳ <span class="text-muted">${esc(k.category)}</span></td><td></td><td class="text-end ${sign}">${fmt(k.amount)}</td><td class="text-end tx-actions">${edit}</td></tr>`;
+    return `<tr class="tx-child"><td></td><td class="ps-4">↳ <span class="text-muted">${esc(k.category)}</span><span class="d-md-none text-muted small"> · part of ${esc(k.description)}</span></td><td></td><td class="text-end ${sign}">${fmt(k.amount)}</td><td class="text-end tx-actions">${edit}</td></tr>`;
   };
   const orphanHtml = t => {
     const sign = t.amount < 0 ? 'neg' : 'pos';
@@ -2290,11 +2288,15 @@ const TAB_NAMES = ['overview', 'categories', 'transactions', 'savings', 'credit-
 async function showTab(name) {
   if (!TAB_NAMES.includes(name)) return;
   document.querySelectorAll('.nav-tabs .nav-link').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
-  document.querySelectorAll('.mobile-nav button[data-tab]').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
   TAB_NAMES.forEach(t => {
     const el = $('tab-' + t);
     if (el) el.classList.toggle('d-none', t !== name);
   });
+  const activeTab = document.querySelector('.nav-tabs .nav-link.active');
+  if (activeTab && activeTab.parentElement && activeTab.parentElement.parentElement) {
+    const strip = activeTab.parentElement.parentElement;
+    strip.scrollLeft = Math.max(0, activeTab.offsetLeft - (strip.clientWidth - activeTab.offsetWidth) / 2);
+  }
   $('add-panel').classList.toggle('d-none', name !== 'transactions');
   try {
     if (name === 'overview') await loadOverview();
@@ -2311,32 +2313,6 @@ async function showTab(name) {
 document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
   a.addEventListener('click', e => { e.preventDefault(); showTab(a.dataset.tab); });
 });
-
-// Bottom bar (phones) and its "More" sheet, wired to the same tabs.
-document.querySelectorAll('.mobile-nav button[data-tab]').forEach(b => {
-  b.addEventListener('click', () => showTab(b.dataset.tab));
-});
-
-let moreSheet = null;
-const moreBtn = document.querySelector('.mobile-nav button[data-more]');
-if (moreBtn) {
-  moreBtn.addEventListener('click', () => {
-    if (!moreSheet) moreSheet = new bootstrap.Offcanvas($('more-tabs'));
-    moreSheet.show();
-  });
-}
-document.querySelectorAll('#more-tabs [data-tab]').forEach(b => {
-  b.addEventListener('click', () => {
-    if (moreSheet) moreSheet.hide();
-    showTab(b.dataset.tab);
-  });
-});
-
-// Switch tabs from code (used to drop a fresh budget on the setup guide).
-function showTab(name) {
-  const link = document.querySelector('.nav-tabs .nav-link[data-tab="' + name + '"]');
-  if (link) link.click();
-}
 
 $('land-signin').addEventListener('click', async () => {
   const btn = $('land-signin');
@@ -2359,10 +2335,26 @@ $('file-input').addEventListener('change', e => {
   e.target.value = '';
 });
 
-$('data-save').addEventListener('click', () => saveNow().catch(e => alert(e.message)));
-$('data-reload').addEventListener('click', reloadSaved);
-$('data-download').addEventListener('click', downloadBackend);
-$('data-drive').addEventListener('click', manualSync);
+// The header Save is the one button most people need: it writes the local copy
+// and uploads it to Google Drive. Reload/Download/Import live in Settings.
+async function saveEverywhere() {
+  if (!appReady || !Backend.loaded) return;
+  const btn = $('data-save');
+  if (btn) btn.disabled = true;
+  try {
+    await saveNow();
+    if (!Drive.hasRefresh()) {
+      updateSyncStatus('Saved on this device — sign in to sync', 'warning');
+      return;
+    }
+    // The guarded push: it refuses to overwrite a newer copy from another
+    // device, so pressing Save can never quietly undo work done elsewhere.
+    await runDriveSync();
+  } finally {
+    if (btn) setTimeout(() => { btn.disabled = false; }, 400);
+  }
+}
+$('data-save').addEventListener('click', () => saveEverywhere().catch(e => alert(e.message)));
 $('period-btn').addEventListener('click', () => {
   const panel = $('tab-allocate');
   panel.classList.toggle('d-none');
@@ -2864,7 +2856,7 @@ $('sync-signin').addEventListener('click', async () => {
   }
 });
 
-$('data-save2').addEventListener('click', () => saveNow().catch(e => alert(e.message)));
+$('data-save2').addEventListener('click', () => saveEverywhere().catch(e => alert(e.message)));
 $('data-reload2').addEventListener('click', reloadSaved);
 $('data-download2').addEventListener('click', downloadBackend);
 $('data-import2').addEventListener('click', () => $('import-input').click());
@@ -2899,7 +2891,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=22', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=23', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };
