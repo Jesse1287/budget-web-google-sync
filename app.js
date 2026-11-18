@@ -1316,6 +1316,8 @@ async function loadSavings() {
 
   const missing = !s.category || !s.category_known;
   $('savings-cat-missing').classList.toggle('d-none', !missing);
+  // First visit: the setup prompt lives inside the folded block, so open it.
+  if (missing) $('savings-setaside-block').open = true;
   $('savings-setaside-form').classList.toggle('d-none', missing);
   $('savings-move-all').classList.add('d-none');
   $('savings-move-hint').textContent = '';
@@ -2625,7 +2627,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=19', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=20', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };

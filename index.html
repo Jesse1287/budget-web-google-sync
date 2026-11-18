@@ -30,6 +30,8 @@ body { background-color: #f8f9fa; }
 @supports (padding: env(safe-area-inset-top)) { body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); } }
 .landing-card { max-width: 480px; }
 .env-chips .badge { font-weight: normal; }
+summary { cursor: pointer; }
+details > summary { list-style-position: inside; }
 </style>
 </head>
 <body>
@@ -187,40 +189,6 @@ body { background-color: #f8f9fa; }
   </div>
 
   <div id="tab-categories">
-    <div class="card mb-3">
-      <div class="card-body p-2">
-        <h6 class="mb-1">Move money between categories</h6>
-        <p class="text-muted small mb-2">Plans change mid-month: move money from one box to another. The total stays the same.</p>
-        <form id="transfer-form" class="row g-2 align-items-end">
-          <div class="col-6 col-md-3">
-            <label class="form-label small mb-0">From</label>
-            <select class="form-select form-select-sm" id="transfer-from"></select>
-          </div>
-          <div class="col-6 col-md-3">
-            <label class="form-label small mb-0">To</label>
-            <select class="form-select form-select-sm" id="transfer-to"></select>
-          </div>
-          <div class="col-4 col-md-2">
-            <label class="form-label small mb-0">Amount</label>
-            <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="transfer-amount" placeholder="0.00" required>
-          </div>
-          <div class="col-4 col-md-2">
-            <label class="form-label small mb-0">Date</label>
-            <input type="date" class="form-control form-control-sm" id="transfer-date" required>
-          </div>
-          <div class="col-4 col-md-2 d-grid">
-            <button class="btn btn-primary btn-sm" type="submit" id="transfer-submit">Move</button>
-          </div>
-          <div class="col-12 col-md-6">
-            <input type="text" class="form-control form-control-sm" id="transfer-note" placeholder="Note (optional)">
-          </div>
-          <div class="col-12 col-md-6">
-            <span id="transfer-preview" class="small text-muted"></span>
-            <span id="transfer-status" class="small"></span>
-          </div>
-        </form>
-      </div>
-    </div>
     <div class="card">
       <div class="card-body p-2">
         <p class="text-muted small mb-1">What's left in each category after paychecks and spending.</p>
@@ -232,6 +200,42 @@ body { background-color: #f8f9fa; }
           <thead><tr><th>Category</th><th class="text-end">Balance</th></tr></thead>
           <tbody id="envelope-body"></tbody>
         </table>
+      </div>
+    </div>
+    <div class="card mt-3">
+      <div class="card-body p-2">
+        <details>
+          <summary class="small text-muted">Move money between categories</summary>
+          <p class="text-muted small mt-2 mb-2">Plans change mid-month: move money from one box to another. The total stays the same.</p>
+          <form id="transfer-form" class="row g-2 align-items-end">
+            <div class="col-12 col-sm-6 col-lg-3">
+              <label class="form-label small mb-0">From</label>
+              <select class="form-select form-select-sm" id="transfer-from"></select>
+            </div>
+            <div class="col-12 col-sm-6 col-lg-3">
+              <label class="form-label small mb-0">To</label>
+              <select class="form-select form-select-sm" id="transfer-to"></select>
+            </div>
+            <div class="col-6 col-sm-3 col-lg-2">
+              <label class="form-label small mb-0">Amount</label>
+              <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="transfer-amount" placeholder="0.00" required>
+            </div>
+            <div class="col-6 col-sm-3 col-lg-2">
+              <label class="form-label small mb-0">Date</label>
+              <input type="date" class="form-control form-control-sm" id="transfer-date" required>
+            </div>
+            <div class="col-12 col-sm-6 col-lg-2 d-grid">
+              <button class="btn btn-primary btn-sm" type="submit" id="transfer-submit">Move</button>
+            </div>
+            <div class="col-12 col-lg-6">
+              <input type="text" class="form-control form-control-sm" id="transfer-note" placeholder="Note (optional)">
+            </div>
+            <div class="col-12 col-lg-6">
+              <span id="transfer-preview" class="small text-muted"></span>
+              <span id="transfer-status" class="small"></span>
+            </div>
+          </form>
+        </details>
       </div>
     </div>
   </div>
@@ -285,45 +289,49 @@ body { background-color: #f8f9fa; }
         </div>
       </div>
       <div class="col-12 col-lg-7">
-        <div class="card h-100">
+        <div class="card">
           <div class="card-body">
-            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-1">
-              <h5 class="mb-0">Save it up first</h5>
-              <span class="badge bg-info fs-6" id="savings-ready">—</span>
-            </div>
-            <p class="text-muted small mb-2">Money still in checking that you have set aside to go to the account. Move it into this category with <strong>Set aside</strong>, or from the Categories tab.</p>
-            <div id="savings-cat-missing" class="alert alert-warning small d-none mb-2">
-              <div id="savings-cat-missing-msg"></div>
-              <div class="d-flex gap-2 flex-wrap align-items-center mt-2">
-                <button class="btn btn-primary btn-sm" id="savings-create-cat" type="button">Create "Savings" category</button>
-                <select id="savings-pick-cat" class="form-select form-select-sm" style="max-width:230px"></select>
+            <details id="savings-setaside-block">
+              <summary>
+                <span class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                  <span class="h5 mb-0">Save it up first</span>
+                  <span class="badge bg-info fs-6" id="savings-ready">—</span>
+                </span>
+              </summary>
+              <p class="text-muted small mt-2 mb-2">Money still in checking that you have set aside to go to the account. Move it into this category with <strong>Set aside</strong>, or from the Categories tab.</p>
+              <div id="savings-cat-missing" class="alert alert-warning small d-none mb-2">
+                <div id="savings-cat-missing-msg"></div>
+                <div class="d-flex gap-2 flex-wrap align-items-center mt-2">
+                  <button class="btn btn-primary btn-sm" id="savings-create-cat" type="button">Create "Savings" category</button>
+                  <select id="savings-pick-cat" class="form-select form-select-sm" style="max-width:230px"></select>
+                </div>
               </div>
-            </div>
-            <form id="savings-setaside-form" class="row g-2 align-items-end">
-              <div class="col-6 col-md-4">
-                <label class="form-label small mb-0">Take it out of</label>
-                <select class="form-select form-select-sm" id="savings-from"></select>
+              <form id="savings-setaside-form" class="row g-2 align-items-end">
+                <div class="col-12 col-sm-6 col-lg-5">
+                  <label class="form-label small mb-0">Take it out of</label>
+                  <select class="form-select form-select-sm" id="savings-from"></select>
+                </div>
+                <div class="col-6 col-sm-3 col-lg-2">
+                  <label class="form-label small mb-0">Amount</label>
+                  <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="savings-amount" placeholder="0.00" required>
+                </div>
+                <div class="col-6 col-sm-3 col-lg-2">
+                  <label class="form-label small mb-0">Date</label>
+                  <input type="date" class="form-control form-control-sm" id="savings-date" required>
+                </div>
+                <div class="col-12 col-sm-12 col-lg-3 d-grid">
+                  <button class="btn btn-outline-success btn-sm" type="submit" id="savings-setaside-btn">Set aside</button>
+                </div>
+                <div class="col-12">
+                  <input type="text" class="form-control form-control-sm" id="savings-note" placeholder="Note (optional)">
+                </div>
+                <div class="col-12"><span id="savings-setaside-status" class="small"></span></div>
+              </form>
+              <div class="d-flex justify-content-between align-items-center mt-2 flex-wrap gap-2">
+                <span class="small text-muted" id="savings-move-hint"></span>
+                <button class="btn btn-link btn-sm p-0 d-none" id="savings-move-all" type="button">Move the ready amount to the account</button>
               </div>
-              <div class="col-6 col-md-3">
-                <label class="form-label small mb-0">Amount</label>
-                <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="savings-amount" placeholder="0.00" required>
-              </div>
-              <div class="col-6 col-md-3">
-                <label class="form-label small mb-0">Date</label>
-                <input type="date" class="form-control form-control-sm" id="savings-date" required>
-              </div>
-              <div class="col-6 col-md-2 d-grid">
-                <button class="btn btn-outline-success btn-sm" type="submit" id="savings-setaside-btn">Set aside</button>
-              </div>
-              <div class="col-12">
-                <input type="text" class="form-control form-control-sm" id="savings-note" placeholder="Note (optional)">
-              </div>
-              <div class="col-12"><span id="savings-setaside-status" class="small"></span></div>
-            </form>
-            <div class="d-flex justify-content-between align-items-center mt-2 flex-wrap gap-2">
-              <span class="small text-muted" id="savings-move-hint"></span>
-              <button class="btn btn-link btn-sm p-0 d-none" id="savings-move-all" type="button">Move the ready amount to the account</button>
-            </div>
+            </details>
           </div>
         </div>
       </div>
@@ -353,12 +361,13 @@ body { background-color: #f8f9fa; }
     <div class="card mb-3">
       <div class="card-body pb-2">
         <h5 class="mb-1">Credit cards</h5>
-        <p class="text-muted small mb-2">Put card purchases here as they happen. Nothing on this page touches your budget yet — the money only leaves checking when you press <strong>Pay card</strong>, which sends one expense to <strong>Transactions</strong>. Tag a charge with the category it belongs to (Food, Gas…) and the payment lands there; leave it untagged and it goes to a <strong>Credit Card</strong> category.</p>
-        <div id="cc-empty" class="d-none">
+        <p class="text-muted small mb-2">Put card purchases here as they happen. Nothing on this page touches your budget yet — the money only leaves checking when you press <strong>Pay card</strong>, which sends one expense to <strong>Transactions</strong>. Tag a charge with the category it belongs to (Food, Gas…) and the payment lands there; leave it untagged and it goes to a <strong>Credit Card</strong> category. A purchase that belongs to more than one category can be split.</p>
+        <div class="d-flex gap-2 flex-wrap align-items-end">
           <div class="input-group input-group-sm" style="max-width:340px">
-            <input id="cc-new-name" class="form-control" placeholder="Card name, e.g. VISA">
+            <input id="cc-new-name" class="form-control" placeholder="New card name, e.g. VISA">
             <button id="cc-add" class="btn btn-primary" type="button">Add card</button>
           </div>
+          <span id="cc-empty" class="small text-muted d-none">No cards yet — name one above.</span>
         </div>
       </div>
     </div>
@@ -462,7 +471,7 @@ body { background-color: #f8f9fa; }
               <button id="data-new" class="btn btn-outline-danger btn-sm">Start fresh</button>
             </div>
             <p class="small text-muted mt-2 mb-0">Import is for a <code>budget.db</code> from another copy of this app — an older version, or a different Google account. The file is checked first, the budget you have now is copied to Google Drive, and only then is it replaced.</p>
-            <p class="small text-muted mt-1 mb-0">App version 19</p>
+            <p class="small text-muted mt-1 mb-0">App version 20</p>
           </div>
         </div>
       </div>
@@ -544,7 +553,7 @@ body { background-color: #f8f9fa; }
     <div class="card mb-3">
       <div class="card-header bg-white"><h6 class="mb-0">Moving money between categories</h6></div>
       <div class="card-body">
-        <p class="small text-muted mb-2">Plans change mid-month. If Food needs more and Fun has extra, open <strong>Categories</strong> and use <strong>Move money between categories</strong>: pick the box the money comes <em>from</em> and the box it goes <em>to</em>, type the amount, and click <strong>Move</strong>. The preview shows both boxes before you commit, and warns if the move puts one of them in the red.</p>
+        <p class="small text-muted mb-2">Plans change mid-month. If Food needs more and Fun has extra, open <strong>Categories</strong> and expand <strong>Move money between categories</strong> at the bottom of the page: pick the box the money comes <em>from</em> and the box it goes <em>to</em>, type the amount, and click <strong>Move</strong>. The preview shows both boxes before you commit, and warns if the move puts one of them in the red.</p>
         <p class="small text-muted mb-0">The total does not change — the money just moves from one box to another. The move appears on the <strong>Transactions</strong> tab as a pair, and <strong>Undo</strong> is offered for a few seconds. After that, a wrong move is fixed by deleting the pair (the × next to it) and moving the money back.</p>
       </div>
     </div>
@@ -567,7 +576,7 @@ body { background-color: #f8f9fa; }
       <div class="card-body">
         <p class="small text-muted mb-2">Your <strong>savings account at the bank</strong> is not part of the checking budget shown on the Categories tab. The <strong>Savings category</strong> is money still in checking that you have set aside to move there.</p>
         <ol class="small text-muted mb-2 ps-3">
-          <li><strong>Set aside</strong> — on the <strong>Savings</strong> tab, move money from a category into the Savings category. Nothing leaves checking; the money just waits in the right box.</li>
+          <li><strong>Set aside</strong> — on the <strong>Savings</strong> tab, expand <strong>Save it up first</strong> and move money from a category into the Savings category. Nothing leaves checking; the money just waits in the right box.</li>
           <li><strong>Move to savings account</strong> — the real bank transfer. The Savings category goes down, the account on the Savings tab goes up, and the Balance badge drops because that money left checking.</li>
           <li><strong>Move back to checking</strong> — move money out of the account into a category you pick. The Balance badge rises again.</li>
           <li><strong>Adjust balance</strong> — type what the bank says (interest, a forgotten transfer). The difference is recorded on the account only; your budget totals do not change.</li>
@@ -791,8 +800,8 @@ body { background-color: #f8f9fa; }
 <script>window.SQLJS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-<script src="backend.js?v=19"></script>
-<script src="drive.js?v=19"></script>
-<script src="app.js?v=19"></script>
+<script src="backend.js?v=20"></script>
+<script src="drive.js?v=20"></script>
+<script src="app.js?v=20"></script>
 </body>
 </html>
