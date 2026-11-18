@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const api = (path, opts) => Backend.api(path, opts);
 const japi = (path, method, body) => api(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-const fmt = n => (n === null || n === undefined) ? '—' : '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt = n => { if (n === null || n === undefined) return '—'; const v = Number(n); return (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // Rows the app writes itself that must not be reshaped by the generic editor:
@@ -1787,10 +1787,163 @@ function setCloseStatus(msg, cls) {
   $('close-status').className = 'small ' + (cls || 'text-muted');
 }
 
+// ---- overview: cash on hand vs card debt, one screen ----
+const r2 = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+function goTab(name) {
+  const link = document.querySelector('.nav-tabs .nav-link[data-tab="' + name + '"]');
+  if (link) link.click();
+}
+
+async function loadOverview() {
+  const [s, savings, cards] = await Promise.all([
+    api('/api/summary'), api('/api/savings'), api('/api/credit-cards'),
+  ]);
+  let rep = null;
+  try { rep = await api('/api/report?month=' + encodeURIComponent(localMonth())); } catch (e) { rep = null; }
+
+  const cash = r2(s.balance + savings.balance);
+  const debt = r2(cards.reduce((t, c) => t + c.owed, 0));
+  const net = r2(cash - debt);
+  const envelopes = s.envelopes.filter(e => e.available !== null)
+    .slice().sort((a, b) => b.available - a.available);
+  const negatives = s.envelopes.filter(e => e.available !== null && e.available < 0);
+  const review = s.needs_review.length;
+  const emptyBudget = envelopes.length === 0;
+
+  const stat = (label, value, sub, cls) => `<div class="col-12 col-sm-4">
+    <div class="card h-100"><div class="card-body py-3">
+      <div class="text-muted small text-uppercase" style="letter-spacing:.04em">${esc(label)}</div>
+      <div class="fs-3 fw-bold ${cls || ''}" style="font-variant-numeric: tabular-nums">${fmt(value)}</div>
+      <div class="small text-muted">${sub}</div>
+    </div></div></div>`;
+
+  const top = envelopes.slice(0, 6);
+  const more = envelopes.length - top.length;
+  const envRows = top.length
+    ? top.map(e => `<tr><td>${esc(e.name)}</td><td class="text-end ${e.available < 0 ? 'neg' : ''}">${fmt(e.available)}</td></tr>`).join('')
+    : '<tr><td class="text-muted" colspan="2">No categories yet.</td></tr>';
+  const envMore = more > 0
+    ? `<tr><td colspan="2" class="text-muted small">…and ${more} more — open Categories for the full list.</td></tr>`
+    : '';
+
+  const cardRows = cards.length
+    ? cards.map(c => `<tr><td>${esc(c.name)}</td><td class="text-end ${c.owed > 0 ? 'neg' : 'text-muted'}">${c.owed > 0 ? fmt(c.owed) : 'paid'}</td></tr>`).join('')
+    : '<tr><td class="text-muted" colspan="2">No cards tracked.</td></tr>';
+
+  const monthName = (() => {
+    const d = new Date();
+    return d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+  })();
+  const monthRows = rep ? `
+    <div class="d-flex justify-content-between small"><span class="text-muted">Received</span><span class="pos">${fmt(rep.received)}</span></div>
+    <div class="d-flex justify-content-between small"><span class="text-muted">Spent</span><span class="neg">${fmt(rep.spent)}</span></div>
+    <div class="d-flex justify-content-between small border-top mt-1 pt-1"><span class="text-muted">Net</span><span class="${rep.net < 0 ? 'neg' : 'pos'} fw-bold">${fmt(rep.net)}</span></div>
+    ${(rep.savings && (rep.savings.to || rep.savings.from)) ? `<div class="small text-muted mt-1">Savings moved: ${fmt(rep.savings.to)} to the account, ${fmt(rep.savings.from)} back.</div>` : ''}
+  ` : '<div class="small text-muted">No activity yet.</div>';
+
+  const warn = negatives.length
+    ? `<div class="alert alert-warning small mb-3">
+        <strong>${negatives.length} categor${negatives.length === 1 ? 'y is' : 'ies are'} in the red</strong> (${negatives.slice(0, 3).map(e => esc(e.name)).join(', ')}${negatives.length > 3 ? '…' : ''}) — that money is already promised to something.
+        <button class="btn btn-sm btn-outline-dark ms-1" data-goto="categories">Open Categories</button>
+      </div>`
+    : '';
+  const setupCallout = emptyBudget
+    ? `<div class="alert alert-info small mb-3">
+        <strong>Nothing budgeted yet.</strong> Add your categories first, then enter today's balance as income.
+        <button class="btn btn-sm btn-outline-dark ms-1" data-goto="categories">Open Categories</button>
+      </div>`
+    : '';
+  const reviewCallout = review > 0
+    ? `<div class="alert alert-info small mb-3">
+        <strong>${review} expense${review === 1 ? '' : 's'} need${review === 1 ? 's' : ''} a category.</strong>
+        <button class="btn btn-sm btn-outline-dark ms-1" data-goto="review">Review them</button>
+      </div>`
+    : '';
+
+  $('overview-body').innerHTML = `
+    <div class="row g-3 mb-3">
+      ${stat('Cash on hand', cash, 'Checking ' + fmt(s.balance) + ' · Savings ' + fmt(savings.balance),
+             cash < 0 ? 'neg' : '')}
+      ${stat('Card debt', debt, cards.length
+               ? cards.length + ' card' + (cards.length === 1 ? '' : 's') + ' tracked'
+               : 'No cards tracked',
+             debt > 0 ? 'neg' : '')}
+      ${stat('Net of debt', net, debt > 0 ? 'Cash minus what you owe' : 'No card debt — this is all yours',
+             net < 0 ? 'neg' : 'pos')}
+    </div>
+
+    ${setupCallout}
+    ${warn}
+    ${reviewCallout}
+
+    <div class="row g-3 mb-3">
+      <div class="col-12 col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <h6 class="mb-0">Where the cash is</h6>
+              <button class="btn btn-link btn-sm p-0" data-goto="categories">Categories</button>
+            </div>
+            <p class="text-muted small mb-2">What is left in each envelope of the checking budget.</p>
+            <table class="table table-sm mb-2"><tbody>${envRows}${envMore}</tbody></table>
+            <div class="d-flex justify-content-between small border-top pt-2">
+              <span class="text-muted">Checking total</span>
+              <span class="fw-bold ${s.balance < 0 ? 'neg' : ''}">${fmt(s.balance)}</span>
+            </div>
+            <div class="d-flex justify-content-between small">
+              <span class="text-muted">${esc(savings.name)} <span class="text-muted">(at the bank)</span></span>
+              <span class="fw-bold ${savings.balance < 0 ? 'neg' : ''}">${fmt(savings.balance)}</span>
+            </div>
+            <button class="btn btn-link btn-sm p-0 mt-1" data-goto="savings">Savings page →</button>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <h6 class="mb-0">What you owe</h6>
+              <button class="btn btn-link btn-sm p-0" data-goto="credit-cards">Credit cards</button>
+            </div>
+            <p class="text-muted small mb-2">Card charges only count against the budget once you pay the card.</p>
+            <table class="table table-sm mb-2"><tbody>${cardRows}</tbody></table>
+            <div class="d-flex justify-content-between small border-top pt-2">
+              <span class="text-muted">Total owed</span>
+              <span class="fw-bold ${debt > 0 ? 'neg' : ''}">${fmt(debt)}</span>
+            </div>
+            <button class="btn btn-link btn-sm p-0 mt-1" data-goto="credit-cards">Pay a card →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-1 flex-wrap gap-2">
+          <h6 class="mb-0">${monthName}</h6>
+          <button class="btn btn-link btn-sm p-0" data-goto="report">Full report →</button>
+        </div>
+        <div class="row g-2">
+          <div class="col-12 col-md-6">${monthRows}</div>
+          <div class="col-12 col-md-6 small text-muted">
+            Cash is the money in checking plus the bank savings account. Card debt is what is still unpaid on your cards, so <strong>net</strong> is what you would have if every card were paid off today.
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+$('overview-body').addEventListener('click', e => {
+  const b = e.target.closest('[data-goto]');
+  if (b) goTab(b.dataset.goto);
+});
+
 async function refreshApp() {
   if (!appReady || !Backend.loaded) return;
   await loadSummary();
   await loadIncomeChecks();
+  if (!$('tab-overview').classList.contains('d-none')) await loadOverview();
   if (!$('tab-transactions').classList.contains('d-none')) await loadTransactions(true);
   if (!$('tab-savings').classList.contains('d-none')) await loadSavings();
   if (!$('tab-credit-cards').classList.contains('d-none')) await loadCreditCards();
@@ -2042,12 +2195,13 @@ document.querySelectorAll('.nav-tabs .nav-link').forEach(a => {
     e.preventDefault();
     document.querySelectorAll('.nav-tabs .nav-link').forEach(x => x.classList.remove('active'));
     a.classList.add('active');
-    ['categories', 'transactions', 'savings', 'credit-cards', 'review', 'paychecks', 'report', 'settings', 'help'].forEach(t => {
+    ['overview', 'categories', 'transactions', 'savings', 'credit-cards', 'review', 'paychecks', 'report', 'settings', 'help'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('d-none', t !== a.dataset.tab);
     });
     $('add-panel').classList.toggle('d-none', a.dataset.tab !== 'transactions');
     try {
+      if (a.dataset.tab === 'overview') await loadOverview();
       if (a.dataset.tab === 'transactions') { await loadTransactions(true); await loadIncomeChecks(); }
       if (a.dataset.tab === 'savings') await loadSavings();
       if (a.dataset.tab === 'credit-cards') await loadCreditCards();
@@ -2627,7 +2781,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js?v=20', { updateViaCache: 'none' });
+      const reg = await navigator.serviceWorker.register('sw.js?v=21', { updateViaCache: 'none' });
       const promptUpdate = () => {
         if (navigator.serviceWorker.controller) $('update-banner').classList.remove('d-none');
       };
